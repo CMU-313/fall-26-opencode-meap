@@ -6,6 +6,7 @@ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Global } from "@opencode-ai/core/global"
 import { Memory } from "@opencode-ai/core/memory"
+import { ProjectID } from "@opencode-ai/schema/project-id"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
 
@@ -64,7 +65,7 @@ describe("Memory", () => {
         expect(raw.startsWith("---\n")).toBe(true)
         expect(raw).toContain(`id: ${written.id}`)
         expect(raw).toContain("scope: global")
-        expect(raw).toContain(`created: ${written.created}`)
+        expect(raw).toContain(written.created)
         // The body is the memory itself, so editing the file is editing the memory.
         expect(raw.slice(raw.indexOf("\n---\n") + 5).trim()).toBe("prefers hints over full answers")
       }),
@@ -76,12 +77,12 @@ describe("Memory", () => {
       Effect.gen(function* () {
         const written = yield* Memory.Service.pipe(
           Effect.flatMap((memory) =>
-            memory.write({ text: "this repo uses bun", scope: "project", project_id: "prj_example" }),
+            memory.write({ text: "this repo uses bun", scope: "project", project_id: ProjectID.make("prj_example") }),
           ),
           Effect.provide(memoryLayer(config)),
         )
         expect(written.scope).toBe("project")
-        expect(written.project_id).toBe("prj_example")
+        expect(written.project_id).toBe(ProjectID.make("prj_example"))
 
         const listed = yield* Memory.Service.pipe(
           Effect.flatMap((memory) => memory.list()),
