@@ -33,88 +33,118 @@ export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("Mem
   }
 }
 
+export class LimitExceededError extends Schema.TaggedErrorClass<LimitExceededError>()("Memory.LimitExceededError", {
+  limit: Schema.Number,
+  oldest: ID,
+}) {
+  override get message() {
+    return `Already holding the maximum of ${this.limit} memories. Delete one, such as ${this.oldest}, before recording another.`
+  }
+}
+
 export interface Interface {
   readonly list: () => Effect.Effect<ReadonlyArray<Info>>
-  readonly write: (input: WriteInput) => Effect.Effect<Info>
+  readonly write: (input: WriteInput) => Effect.Effect<Info, LimitExceededError>
   readonly update: (id: ID, input: { readonly text: string }) => Effect.Effect<Info, NotFoundError>
   readonly remove: (id: ID) => Effect.Effect<void, NotFoundError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/Memory") {}
 
+export const defaultMaxEntries = 100
+
+export interface Options {
+  readonly maxEntries?: number
+}
+
 const decode = Schema.decodeUnknownOption(Info)
 const decodeID = Schema.decodeUnknownOption(ID)
 
-const layer = Layer.effect(
-  Service,
-  Effect.gen(function* () {
-    const fs = yield* FSUtil.Service
-    const global = yield* Global.Service
-    // A subdirectory keeps memories from mixing with AGENTS.md and opencode.json,
-    // which already live at the root of the config directory.
-    const directory = path.join(global.config, "memory")
-    const filepath = (id: ID) => path.join(directory, `${id}.md`)
+const make = (options: Options = {}) =>
+  Layer.effect(
+    Service,
+    Effect.gen(function* () {
+      const fs = yield* FSUtil.Service
+      const global = yield* Global.Service
+      // Nothing can be stored under a cap below one, so treat that as one and let
+      // configuration validation report the bad value.
+      const maxEntries = Math.max(1, options.maxEntries ?? defaultMaxEntries)
+      // A subdirectory keeps memories from mixing with AGENTS.md and opencode.json,
+      // which already live at the root of the config directory.
+      const directory = path.join(global.config, "memory")
+      const filepath = (id: ID) => path.join(directory, `${id}.md`)
 
-    // A memory the user broke by hand is skipped rather than failing the whole
-    // read, but never silently: an unexplained disappearance is worse than noise.
-    const read = Effect.fn("Memory.read")(function* (file: string) {
-      // The file name carries the identity, so copying a file produces a genuinely
-      // separate memory and update and remove always act on the file they named.
-      const id = decodeID(path.basename(file, ".md")).valueOrUndefined
-      if (!id) {
-        yield* Effect.logWarning("skipping memory file whose name is not a memory id", { file })
-        return undefined
-      }
-      const content = yield* fs.readFileStringSafe(file).pipe(Effect.catch(() => Effect.succeed(undefined)))
-      if (!content) return undefined
-      // Frontmatter parsing recovers from almost anything, dropping the fields it
-      // cannot read, so a broken file fails at decoding rather than at parsing.
-      const markdown = ConfigMarkdown.parseOption(content)
-      const info = markdown && decode(fields(markdown, id)).valueOrUndefined
-      if (!info) {
-        yield* Effect.logWarning("skipping memory file that does not parse as a memory", { file })
-        return undefined
-      }
-      return info
-    })
+      // A memory the user broke by hand is skipped rather than failing the whole
+      // read, but never silently: an unexplained disappearance is worse than noise.
+      const read = Effect.fn("Memory.read")(function* (file: string) {
+        // The file name carries the identity, so copying a file produces a genuinely
+        // separate memory and update and remove always act on the file they named.
+        const id = decodeID(path.basename(file, ".md")).valueOrUndefined
+        if (!id) {
+          yield* Effect.logWarning("skipping memory file whose name is not a memory id", { file })
+          return undefined
+        }
+        const content = yield* fs.readFileStringSafe(file).pipe(Effect.catch(() => Effect.succeed(undefined)))
+        if (!content) return undefined
+        // Frontmatter parsing recovers from almost anything, dropping the fields it
+        // cannot read, so a broken file fails at decoding rather than at parsing.
+        const markdown = ConfigMarkdown.parseOption(content)
+        const info = markdown && decode(fields(markdown, id)).valueOrUndefined
+        if (!info) {
+          yield* Effect.logWarning("skipping memory file that does not parse as a memory", { file })
+          return undefined
+        }
+        return info
+      })
 
-    return Service.of({
-      write: Effect.fn("Memory.write")(function* (input: WriteInput) {
-        const info = Info.make({
-          id: ID.create(),
-          text: input.text,
-          scope: input.scope,
-          ...(input.project_id === undefined ? {} : { project_id: input.project_id }),
-          created: new Date().toISOString(),
-        })
-        yield* fs.writeWithDirs(filepath(info.id), serialize(info)).pipe(Effect.orDie)
-        return info
-      }),
-      update: Effect.fn("Memory.update")(function* (id: ID, input: { readonly text: string }) {
-        const existing = yield* read(filepath(id))
-        if (!existing) return yield* new NotFoundError({ id })
-        const info = Info.make({ ...existing, text: input.text })
-        yield* fs.writeWithDirs(filepath(id), serialize(info)).pipe(Effect.orDie)
-        return info
-      }),
-      // Existence rather than a successful parse, so a memory whose file has been
-      // corrupted by hand can still be deleted.
-      remove: Effect.fn("Memory.remove")(function* (id: ID) {
-        if (!(yield* fs.existsSafe(filepath(id)))) return yield* new NotFoundError({ id })
-        yield* fs.remove(filepath(id)).pipe(Effect.orDie)
-      }),
-      list: Effect.fn("Memory.list")(function* () {
+      const list = Effect.fn("Memory.list")(function* () {
         const files = yield* fs
           .glob("*.md", { cwd: directory, absolute: true, include: "file" })
           .pipe(Effect.catch(() => Effect.succeed([] as string[])))
         const loaded = yield* Effect.forEach(files.toSorted(), read, { concurrency: "unbounded" })
         return loaded.filter((item): item is Info => item !== undefined)
-      }),
-    })
-  }),
-)
+      })
 
-export const node = makeGlobalNode({ service: Service, layer, deps: [FSUtil.node, Global.node] })
+      return Service.of({
+        list,
+        write: Effect.fn("Memory.write")(function* (input: WriteInput) {
+          // Refuse rather than evict. Dropping the oldest memory to make room would
+          // silently discard something the user asked to be remembered.
+          const existing = yield* list()
+          if (existing.length >= maxEntries)
+            return yield* new LimitExceededError({ limit: maxEntries, oldest: existing[0].id })
+          const info = Info.make({
+            id: ID.create(),
+            text: input.text,
+            scope: input.scope,
+            ...(input.project_id === undefined ? {} : { project_id: input.project_id }),
+            created: new Date().toISOString(),
+          })
+          yield* fs.writeWithDirs(filepath(info.id), serialize(info)).pipe(Effect.orDie)
+          return info
+        }),
+        update: Effect.fn("Memory.update")(function* (id: ID, input: { readonly text: string }) {
+          const existing = yield* read(filepath(id))
+          if (!existing) return yield* new NotFoundError({ id })
+          const info = Info.make({ ...existing, text: input.text })
+          yield* fs.writeWithDirs(filepath(id), serialize(info)).pipe(Effect.orDie)
+          return info
+        }),
+        // Existence rather than a successful parse, so a memory whose file has been
+        // corrupted by hand can still be deleted.
+        remove: Effect.fn("Memory.remove")(function* (id: ID) {
+          if (!(yield* fs.existsSafe(filepath(id)))) return yield* new NotFoundError({ id })
+          yield* fs.remove(filepath(id)).pipe(Effect.orDie)
+        }),
+      })
+    }),
+  )
+
+export const node = makeGlobalNode({ service: Service, layer: make(), deps: [FSUtil.node, Global.node] })
+
+/** The seam configuration uses to supply its own entry cap. */
+export const nodeWith = (options: Options) =>
+  makeGlobalNode({ service: Service, layer: make(options), deps: [FSUtil.node, Global.node] })
 
 // The id is deliberately absent: it lives in the file name, so there is only one
 // place for it to be wrong.

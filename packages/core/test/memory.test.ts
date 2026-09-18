@@ -18,6 +18,12 @@ const it = testEffect(Layer.empty)
 const memoryLayer = (config: string) =>
   AppNodeBuilder.build(LayerNode.group([Memory.node]), [[Global.node, Global.layerWith({ config })]])
 
+const cappedLayer = (config: string, maxEntries: number) =>
+  AppNodeBuilder.build(LayerNode.group([Memory.node]), [
+    [Global.node, Global.layerWith({ config })],
+    [Memory.node, Memory.nodeWith({ maxEntries })],
+  ])
+
 const withConfig = <A, E, R>(body: (config: string) => Effect.Effect<A, E, R>) =>
   Effect.acquireRelease(
     Effect.promise(() => tmpdir()),
@@ -242,6 +248,62 @@ describe("Memory", () => {
         expect(listed.map((item) => item.text)).toEqual(["prefers worked examples"])
         expect(listed[0].id).toBe(id)
         expect(listed[0].created).toBe("2026-09-18T12:00:00.000Z")
+      }),
+    ),
+  )
+
+  it.live("refuses a write at the cap and names a memory to delete rather than evicting one", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const layer = cappedLayer(config, 2)
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) =>
+            Effect.forEach(["keeps a paper notebook", "reviews with flashcards"], (text) =>
+              memory.write({ text, scope: "global" }),
+            ),
+          ),
+          Effect.provide(layer),
+        )
+
+        const error = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "one memory too many", scope: "global" })),
+          Effect.provide(layer),
+          Effect.flip,
+        )
+        expect(error).toBeInstanceOf(Memory.LimitExceededError)
+        expect(error.limit).toBe(2)
+        expect(error.oldest).toBe(written[0].id)
+        expect(error.message).toContain(written[0].id)
+
+        // Nothing was evicted to make room, and the refused memory was not written.
+        const listed = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.list()),
+          Effect.provide(layer),
+        )
+        expect(listed.map((item) => item.text)).toEqual(["keeps a paper notebook", "reviews with flashcards"])
+        expect(yield* Effect.promise(() => fs.readdir(path.join(config, "memory")))).toHaveLength(2)
+      }),
+    ),
+  )
+
+  it.live("accepts a write again once room has been made", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const layer = cappedLayer(config, 1)
+        const first = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "keeps a paper notebook", scope: "global" })),
+          Effect.provide(layer),
+        )
+        yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.remove(first.id)),
+          Effect.provide(layer),
+        )
+
+        const second = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "reviews with flashcards", scope: "global" })),
+          Effect.provide(layer),
+        )
+        expect(second.text).toBe("reviews with flashcards")
       }),
     ),
   )
