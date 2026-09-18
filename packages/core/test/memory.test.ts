@@ -92,4 +92,80 @@ describe("Memory", () => {
       }),
     ),
   )
+
+  it.live("changes the text of a memory without disturbing its identity", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "studies late at night", scope: "global" })),
+          Effect.provide(memoryLayer(config)),
+        )
+
+        const updated = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.update(written.id, { text: "studies early in the morning" })),
+          Effect.provide(memoryLayer(config)),
+        )
+        expect(updated.text).toBe("studies early in the morning")
+        expect(updated.id).toBe(written.id)
+        expect(updated.created).toBe(written.created)
+        expect(updated.scope).toBe(written.scope)
+
+        const listed = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.list()),
+          Effect.provide(memoryLayer(config)),
+        )
+        expect(listed).toEqual([updated])
+      }),
+    ),
+  )
+
+  it.live("removes a memory from disk so later layers no longer see it", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) =>
+            Effect.forEach(["keeps a paper notebook", "reviews with flashcards"], (text) =>
+              memory.write({ text, scope: "global" }),
+            ),
+          ),
+          Effect.provide(memoryLayer(config)),
+        )
+
+        yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.remove(written[0].id)),
+          Effect.provide(memoryLayer(config)),
+        )
+
+        const listed = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.list()),
+          Effect.provide(memoryLayer(config)),
+        )
+        expect(listed.map((item) => item.text)).toEqual(["reviews with flashcards"])
+        expect(yield* Effect.promise(() => fs.readdir(path.join(config, "memory")))).toEqual([`${written[1].id}.md`])
+      }),
+    ),
+  )
+
+  it.live("reports a missing memory instead of silently succeeding", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const missing = Memory.ID.make("mem_doesnotexist")
+
+        const updateError = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.update(missing, { text: "never recorded" })),
+          Effect.provide(memoryLayer(config)),
+          Effect.flip,
+        )
+        expect(updateError).toBeInstanceOf(Memory.NotFoundError)
+        expect(updateError.id).toBe(missing)
+
+        const removeError = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.remove(missing)),
+          Effect.provide(memoryLayer(config)),
+          Effect.flip,
+        )
+        expect(removeError).toBeInstanceOf(Memory.NotFoundError)
+      }),
+    ),
+  )
 })
