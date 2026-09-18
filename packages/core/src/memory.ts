@@ -25,9 +25,19 @@ export interface WriteInput {
   readonly project_id?: typeof ProjectID.Type
 }
 
+export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("Memory.NotFoundError", {
+  id: ID,
+}) {
+  override get message() {
+    return `No memory with id ${this.id}`
+  }
+}
+
 export interface Interface {
   readonly list: () => Effect.Effect<ReadonlyArray<Info>>
   readonly write: (input: WriteInput) => Effect.Effect<Info>
+  readonly update: (id: ID, input: { readonly text: string }) => Effect.Effect<Info, NotFoundError>
+  readonly remove: (id: ID) => Effect.Effect<void, NotFoundError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/Memory") {}
@@ -42,6 +52,7 @@ const layer = Layer.effect(
     // A subdirectory keeps memories from mixing with AGENTS.md and opencode.json,
     // which already live at the root of the config directory.
     const directory = path.join(global.config, "memory")
+    const filepath = (id: ID) => path.join(directory, `${id}.md`)
 
     const read = Effect.fn("Memory.read")(function* (file: string) {
       const content = yield* fs.readFileStringSafe(file).pipe(Effect.catch(() => Effect.succeed(undefined)))
@@ -60,8 +71,21 @@ const layer = Layer.effect(
           ...(input.project_id === undefined ? {} : { project_id: input.project_id }),
           created: new Date().toISOString(),
         })
-        yield* fs.writeWithDirs(path.join(directory, `${info.id}.md`), serialize(info)).pipe(Effect.orDie)
+        yield* fs.writeWithDirs(filepath(info.id), serialize(info)).pipe(Effect.orDie)
         return info
+      }),
+      update: Effect.fn("Memory.update")(function* (id: ID, input: { readonly text: string }) {
+        const existing = yield* read(filepath(id))
+        if (!existing) return yield* new NotFoundError({ id })
+        const info = Info.make({ ...existing, text: input.text })
+        yield* fs.writeWithDirs(filepath(id), serialize(info)).pipe(Effect.orDie)
+        return info
+      }),
+      // Existence rather than a successful parse, so a memory whose file has been
+      // corrupted by hand can still be deleted.
+      remove: Effect.fn("Memory.remove")(function* (id: ID) {
+        if (!(yield* fs.existsSafe(filepath(id)))) return yield* new NotFoundError({ id })
+        yield* fs.remove(filepath(id)).pipe(Effect.orDie)
       }),
       list: Effect.fn("Memory.list")(function* () {
         const files = yield* fs
