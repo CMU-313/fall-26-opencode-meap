@@ -1,5 +1,6 @@
 import { describe, expect } from "bun:test"
 import { Effect, Layer } from "effect"
+import { logLines } from "effect/testing/TestConsole"
 import fs from "fs/promises"
 import path from "path"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -167,5 +168,23 @@ describe("Memory", () => {
         expect(removeError).toBeInstanceOf(Memory.NotFoundError)
       }),
     ),
+  )
+
+  it.live("skips hand corrupted memory files with a warning and still loads the valid ones", () =>
+    Effect.gen(function* () {
+      const listed = yield* Memory.Service.pipe(
+        Effect.flatMap((memory) => memory.list()),
+        Effect.provide(memoryLayer(path.join(import.meta.dir, "fixtures", "memory-config"))),
+      )
+      expect(listed.map((item) => item.text)).toEqual(["prefers hints over full answers", "reviews with flashcards"])
+
+      const logged = JSON.stringify(yield* logLines)
+      expect(logged).toContain("WARN")
+      // One file loses its fields to an unterminated quote, the other carries an
+      // invalid scope. Both are named, so a vanished memory can be traced.
+      expect(logged).toContain("mem_0000000000000000000broken1.md")
+      expect(logged).toContain("mem_0000000000000000000broken2.md")
+      expect(logged).not.toContain("mem_00000000000000000000valid1.md")
+    }),
   )
 })

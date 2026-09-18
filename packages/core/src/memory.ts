@@ -54,12 +54,20 @@ const layer = Layer.effect(
     const directory = path.join(global.config, "memory")
     const filepath = (id: ID) => path.join(directory, `${id}.md`)
 
+    // A memory the user broke by hand is skipped rather than failing the whole
+    // read, but never silently: an unexplained disappearance is worse than noise.
     const read = Effect.fn("Memory.read")(function* (file: string) {
       const content = yield* fs.readFileStringSafe(file).pipe(Effect.catch(() => Effect.succeed(undefined)))
       if (!content) return undefined
+      // Frontmatter parsing recovers from almost anything, dropping the fields it
+      // cannot read, so a broken file fails at decoding rather than at parsing.
       const markdown = ConfigMarkdown.parseOption(content)
-      if (!markdown) return undefined
-      return decode({ ...markdown.data, text: markdown.content.trim() }).valueOrUndefined
+      const info = markdown && decode({ ...markdown.data, text: markdown.content.trim() }).valueOrUndefined
+      if (!info) {
+        yield* Effect.logWarning("skipping memory file that does not parse as a memory", { file })
+        return undefined
+      }
+      return info
     })
 
     return Service.of({
