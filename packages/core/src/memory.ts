@@ -43,6 +43,7 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/Memory") {}
 
 const decode = Schema.decodeUnknownOption(Info)
+const decodeID = Schema.decodeUnknownOption(ID)
 
 const layer = Layer.effect(
   Service,
@@ -57,12 +58,19 @@ const layer = Layer.effect(
     // A memory the user broke by hand is skipped rather than failing the whole
     // read, but never silently: an unexplained disappearance is worse than noise.
     const read = Effect.fn("Memory.read")(function* (file: string) {
+      // The file name carries the identity, so copying a file produces a genuinely
+      // separate memory and update and remove always act on the file they named.
+      const id = decodeID(path.basename(file, ".md")).valueOrUndefined
+      if (!id) {
+        yield* Effect.logWarning("skipping memory file whose name is not a memory id", { file })
+        return undefined
+      }
       const content = yield* fs.readFileStringSafe(file).pipe(Effect.catch(() => Effect.succeed(undefined)))
       if (!content) return undefined
       // Frontmatter parsing recovers from almost anything, dropping the fields it
       // cannot read, so a broken file fails at decoding rather than at parsing.
       const markdown = ConfigMarkdown.parseOption(content)
-      const info = markdown && decode({ ...markdown.data, text: markdown.content.trim() }).valueOrUndefined
+      const info = markdown && decode(fields(markdown, id)).valueOrUndefined
       if (!info) {
         yield* Effect.logWarning("skipping memory file that does not parse as a memory", { file })
         return undefined
@@ -108,11 +116,23 @@ const layer = Layer.effect(
 
 export const node = makeGlobalNode({ service: Service, layer, deps: [FSUtil.node, Global.node] })
 
+// The id is deliberately absent: it lives in the file name, so there is only one
+// place for it to be wrong.
 function serialize(info: Info) {
   return matter.stringify(info.text, {
-    id: info.id,
     scope: info.scope,
     ...(info.project_id === undefined ? {} : { project_id: info.project_id }),
     created: info.created,
   })
+}
+
+function fields(markdown: NonNullable<ReturnType<typeof ConfigMarkdown.parseOption>>, id: ID) {
+  return {
+    ...markdown.data,
+    id,
+    text: markdown.content.trim(),
+    // YAML reads an unquoted timestamp as a date, so accept that too rather than
+    // discarding a memory over a hand edit that dropped the quotes.
+    ...(markdown.data.created instanceof Date ? { created: markdown.data.created.toISOString() } : {}),
+  }
 }

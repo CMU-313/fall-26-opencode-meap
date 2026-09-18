@@ -64,7 +64,9 @@ describe("Memory", () => {
         const file = path.join(config, "memory", `${written.id}.md`)
         const raw = yield* Effect.promise(() => fs.readFile(file, "utf8"))
         expect(raw.startsWith("---\n")).toBe(true)
-        expect(raw).toContain(`id: ${written.id}`)
+        // The file name is the only place the identity lives, so it cannot drift
+        // out of step with the frontmatter.
+        expect(raw).not.toContain("\nid:")
         expect(raw).toContain("scope: global")
         expect(raw).toContain(written.created)
         // The body is the memory itself, so editing the file is editing the memory.
@@ -186,5 +188,61 @@ describe("Memory", () => {
       expect(logged).toContain("mem_0000000000000000000broken2.md")
       expect(logged).not.toContain("mem_00000000000000000000valid1.md")
     }),
+  )
+
+  it.live("treats a memory file copied by hand as a separate memory", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "reviews with flashcards", scope: "global" })),
+          Effect.provide(memoryLayer(config)),
+        )
+        const copy = Memory.ID.make("mem_copiedbyhand000000000001")
+        yield* Effect.promise(() =>
+          fs.copyFile(path.join(config, "memory", `${written.id}.md`), path.join(config, "memory", `${copy}.md`)),
+        )
+
+        const listed = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.list()),
+          Effect.provide(memoryLayer(config)),
+        )
+        expect(listed.map((item) => item.id).toSorted()).toEqual([copy, written.id].toSorted())
+
+        // The copy is reachable in its own right rather than shadowed by the original.
+        yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.remove(copy)),
+          Effect.provide(memoryLayer(config)),
+        )
+        const remaining = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.list()),
+          Effect.provide(memoryLayer(config)),
+        )
+        expect(remaining.map((item) => item.id)).toEqual([written.id])
+      }),
+    ),
+  )
+
+  it.live("keeps a memory whose timestamp was left unquoted by hand", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const id = Memory.ID.make("mem_editedbyhand000000000001")
+        yield* Effect.promise(async () => {
+          await fs.mkdir(path.join(config, "memory"), { recursive: true })
+          // YAML reads this timestamp as a date rather than a string.
+          await fs.writeFile(
+            path.join(config, "memory", `${id}.md`),
+            "---\nscope: global\ncreated: 2026-09-18T12:00:00.000Z\n---\nprefers worked examples\n",
+          )
+        })
+
+        const listed = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.list()),
+          Effect.provide(memoryLayer(config)),
+        )
+        expect(listed.map((item) => item.text)).toEqual(["prefers worked examples"])
+        expect(listed[0].id).toBe(id)
+        expect(listed[0].created).toBe("2026-09-18T12:00:00.000Z")
+      }),
+    ),
   )
 })
