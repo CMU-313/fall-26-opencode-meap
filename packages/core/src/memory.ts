@@ -42,7 +42,17 @@ export class LimitExceededError extends Schema.TaggedErrorClass<LimitExceededErr
   }
 }
 
+export class UnreadableError extends Schema.TaggedErrorClass<UnreadableError>()("Memory.UnreadableError", {
+  path: Schema.String,
+}) {
+  override get message() {
+    return `Unable to read memories at ${this.path}`
+  }
+}
+
 export interface Interface {
+  /** Fails rather than reporting an empty set, so a caller can tell silence from absence. */
+  readonly observe: () => Effect.Effect<ReadonlyArray<Info>, UnreadableError>
   readonly list: () => Effect.Effect<ReadonlyArray<Info>>
   readonly write: (input: WriteInput) => Effect.Effect<Info, LimitExceededError>
   readonly update: (id: ID, input: { readonly text: string }) => Effect.Effect<Info, NotFoundError>
@@ -84,8 +94,12 @@ const make = (options: Options = {}) =>
           yield* Effect.logWarning("skipping memory file whose name is not a memory id", { file })
           return undefined
         }
-        const content = yield* fs.readFileStringSafe(file).pipe(Effect.catch(() => Effect.succeed(undefined)))
-        if (!content) return undefined
+        const content = yield* fs
+          .readFileStringSafe(file)
+          .pipe(Effect.catch(() => Effect.fail(new UnreadableError({ path: file }))))
+        // The caller listed this file a moment ago, so an empty read means it could
+        // not be read rather than that it was never there.
+        if (content === undefined) return yield* new UnreadableError({ path: file })
         // Frontmatter parsing recovers from almost anything, dropping the fields it
         // cannot read, so a broken file fails at decoding rather than at parsing.
         const markdown = ConfigMarkdown.parseOption(content)
@@ -97,15 +111,22 @@ const make = (options: Options = {}) =>
         return info
       })
 
-      const list = Effect.fn("Memory.list")(function* () {
+      // A missing directory globs to no files, so only a genuine failure to read
+      // the directory reaches the error channel here.
+      const observe = Effect.fn("Memory.observe")(function* () {
         const files = yield* fs
           .glob("*.md", { cwd: directory, absolute: true, include: "file" })
-          .pipe(Effect.catch(() => Effect.succeed([] as string[])))
+          .pipe(Effect.catch(() => Effect.fail(new UnreadableError({ path: directory }))))
         const loaded = yield* Effect.forEach(files.toSorted(), read, { concurrency: "unbounded" })
         return loaded.filter((item): item is Info => item !== undefined)
       })
 
+      const list = Effect.fn("Memory.list")(function* () {
+        return yield* observe().pipe(Effect.catch(() => Effect.succeed([] as ReadonlyArray<Info>)))
+      })
+
       return Service.of({
+        observe,
         list,
         write: Effect.fn("Memory.write")(function* (input: WriteInput) {
           // Refuse rather than evict. Dropping the oldest memory to make room would
@@ -124,7 +145,7 @@ const make = (options: Options = {}) =>
           return info
         }),
         update: Effect.fn("Memory.update")(function* (id: ID, input: { readonly text: string }) {
-          const existing = yield* read(filepath(id))
+          const existing = yield* read(filepath(id)).pipe(Effect.catch(() => Effect.succeed(undefined)))
           if (!existing) return yield* new NotFoundError({ id })
           const info = Info.make({ ...existing, text: input.text })
           yield* fs.writeWithDirs(filepath(id), serialize(info)).pipe(Effect.orDie)

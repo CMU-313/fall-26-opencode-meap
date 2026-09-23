@@ -5,6 +5,7 @@ import fs from "fs/promises"
 import path from "path"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Global } from "@opencode-ai/core/global"
 import { Memory } from "@opencode-ai/core/memory"
 import { ProjectID } from "@opencode-ai/schema/project-id"
@@ -17,6 +18,20 @@ const it = testEffect(Layer.empty)
 // call observes only what the first one durably wrote.
 const memoryLayer = (config: string) =>
   AppNodeBuilder.build(LayerNode.group([Memory.node]), [[Global.node, Global.layerWith({ config })]])
+
+// Overrides single filesystem operations so an unreadable directory or file can be
+// observed without depending on real permissions.
+const failingLayer = (config: string, overrides: Partial<FSUtil.Interface>) =>
+  AppNodeBuilder.build(LayerNode.group([Memory.node]), [
+    [Global.node, Global.layerWith({ config })],
+    [
+      FSUtil.node,
+      Layer.effect(
+        FSUtil.Service,
+        FSUtil.Service.pipe(Effect.map((fs) => FSUtil.Service.of({ ...fs, ...overrides }))),
+      ).pipe(Layer.provide(LayerNode.compile(FSUtil.node))),
+    ],
+  ])
 
 const cappedLayer = (config: string, maxEntries: number) =>
   AppNodeBuilder.build(LayerNode.group([Memory.node]), [
@@ -306,5 +321,63 @@ describe("Memory", () => {
         expect(second.text).toBe("reviews with flashcards")
       }),
     ),
+  )
+
+  it.live("reports an unreadable memory directory instead of reporting no memories", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const layer = failingLayer(config, {
+          glob: () => Effect.fail(new FSUtil.FileSystemError({ method: "glob" })),
+        })
+
+        const error = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.observe()),
+          Effect.provide(layer),
+          Effect.flip,
+        )
+        expect(error).toBeInstanceOf(Memory.UnreadableError)
+        expect(error.path).toBe(path.join(config, "memory"))
+
+        // list stays total so a listing still shows whatever can be read.
+        expect(
+          yield* Memory.Service.pipe(
+            Effect.flatMap((memory) => memory.list()),
+            Effect.provide(layer),
+          ),
+        ).toEqual([])
+      }),
+    ),
+  )
+
+  it.live("reports a memory file that is listed but cannot be read", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "reviews with flashcards", scope: "global" })),
+          Effect.provide(memoryLayer(config)),
+        )
+        const layer = failingLayer(config, { readFileStringSafe: () => Effect.succeed(undefined) })
+
+        const error = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.observe()),
+          Effect.provide(layer),
+          Effect.flip,
+        )
+        expect(error).toBeInstanceOf(Memory.UnreadableError)
+        expect(error.path).toBe(path.join(config, "memory", `${written.id}.md`))
+      }),
+    ),
+  )
+
+  it.live("still skips a corrupt file rather than calling the whole directory unreadable", () =>
+    Effect.gen(function* () {
+      // Corruption and unreadability are different: the fixture directory holds two
+      // broken files, and observing it must still succeed with the valid two.
+      const observed = yield* Memory.Service.pipe(
+        Effect.flatMap((memory) => memory.observe()),
+        Effect.provide(memoryLayer(path.join(import.meta.dir, "fixtures", "memory-config"))),
+      )
+      expect(observed.map((item) => item.text)).toEqual(["prefers hints over full answers", "reviews with flashcards"])
+    }),
   )
 })
