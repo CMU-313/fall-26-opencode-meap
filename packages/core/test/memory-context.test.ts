@@ -3,6 +3,7 @@ import { Effect, Layer } from "effect"
 import path from "path"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Global } from "@opencode-ai/core/global"
 import { Location } from "@opencode-ai/core/location"
 import { Memory } from "@opencode-ai/core/memory"
@@ -33,16 +34,33 @@ const session = (directory: string, projectID = ProjectID.global) =>
 
 // Each call is an independent session over the same config directory, so it sees
 // only what an earlier session durably wrote.
-const sessionContext = (config: string, locationLayer = session("/repo")) =>
+const sessionContext = (
+  config: string,
+  locationLayer = session("/repo"),
+  filesystemLayer?: Layer.Layer<FSUtil.Service>,
+) =>
   SystemContextRegistry.Service.pipe(
     Effect.flatMap((registry) => registry.load()),
     Effect.provide(
       AppNodeBuilder.build(LayerNode.group([SystemContextRegistry.node, MemoryContext.node]), [
         [Global.node, Global.layerWith({ config })],
         [Location.node, locationLayer],
+        ...(filesystemLayer ? [[FSUtil.node, filesystemLayer] as const] : []),
       ]),
     ),
   )
+
+// Overrides single filesystem operations so an unreadable memory directory can be
+// observed without depending on real permissions.
+const failingFilesystem = (overrides: Partial<FSUtil.Interface>) =>
+  Layer.effect(
+    FSUtil.Service,
+    FSUtil.Service.pipe(Effect.map((fs) => FSUtil.Service.of({ ...fs, ...overrides }))),
+  ).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
+
+const unreadableDirectory = failingFilesystem({
+  glob: () => Effect.fail(new FSUtil.FileSystemError({ method: "glob" })),
+})
 
 const withConfig = <A, E, R>(body: (config: string) => Effect.Effect<A, E, R>) =>
   Effect.acquireRelease(
@@ -173,7 +191,7 @@ describe("MemoryContext", () => {
     ),
   )
 
-  it.live("stays silent across turns when no memory has changed", () =>
+  it.live("emits no mid-conversation system message when no memory has changed", () =>
     withConfig((config) =>
       Effect.gen(function* () {
         // A project memory alongside a global one, so both branded ids have to survive
@@ -204,7 +222,7 @@ describe("MemoryContext", () => {
     ),
   )
 
-  it.live("announces an edited memory mid-conversation instead of rebuilding the baseline", () =>
+  it.live("emits a mid-conversation system message when a memory is edited, not a rebuilt baseline", () =>
     withConfig((config) =>
       Effect.gen(function* () {
         const written = yield* Memory.Service.pipe(
@@ -238,7 +256,7 @@ describe("MemoryContext", () => {
     ),
   )
 
-  it.live("announces the first memory recorded in a session that started with none", () =>
+  it.live("emits a mid-conversation system message for the first memory in a session that started with none", () =>
     withConfig((config) =>
       Effect.gen(function* () {
         const initialized = yield* SystemContext.initialize(yield* sessionContext(config))
@@ -262,7 +280,7 @@ describe("MemoryContext", () => {
     ),
   )
 
-  it.live("re-announces the remaining memories when one of several is deleted", () =>
+  it.live("emits the remaining memories as a mid-conversation system message when one of several is deleted", () =>
     withConfig((config) =>
       Effect.gen(function* () {
         const written = yield* Memory.Service.pipe(
@@ -294,7 +312,7 @@ describe("MemoryContext", () => {
     ),
   )
 
-  it.live("emits the removal text when the last memory is deleted", () =>
+  it.live("emits the removal text as a mid-conversation system message when the last memory is deleted", () =>
     withConfig((config) =>
       Effect.gen(function* () {
         const written = yield* Memory.Service.pipe(
@@ -312,6 +330,113 @@ describe("MemoryContext", () => {
           text: "Previously remembered notes about this user no longer apply.",
           snapshot: {},
         })
+      }),
+    ),
+  )
+
+  it.live("keeps admitted memories while the memory directory cannot be read", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "prefers hints over full answers", scope: "global" })),
+          Effect.provide(memoryLayer(config)),
+        )
+        const initialized = yield* SystemContext.initialize(yield* sessionContext(config))
+
+        // Were the failure read as an empty directory, this would be the removal text.
+        expect(
+          yield* SystemContext.reconcile(
+            yield* sessionContext(config, session("/repo"), unreadableDirectory),
+            initialized.snapshot,
+          ),
+        ).toEqual({ _tag: "Unchanged" })
+      }),
+    ),
+  )
+
+  it.live("keeps admitted memories while a listed memory file cannot be read", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "prefers hints over full answers", scope: "global" })),
+          Effect.provide(memoryLayer(config)),
+        )
+        const initialized = yield* SystemContext.initialize(yield* sessionContext(config))
+
+        const unreadableFile = failingFilesystem({ readFileStringSafe: () => Effect.succeed(undefined) })
+        expect(
+          yield* SystemContext.reconcile(
+            yield* sessionContext(config, session("/repo"), unreadableFile),
+            initialized.snapshot,
+          ),
+        ).toEqual({ _tag: "Unchanged" })
+      }),
+    ),
+  )
+
+  it.live("picks up changes made during an outage once the directory is readable again", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "studies late at night", scope: "global" })),
+          Effect.provide(memoryLayer(config)),
+        )
+        const initialized = yield* SystemContext.initialize(yield* sessionContext(config))
+        yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.update(written.id, { text: "studies early in the morning" })),
+          Effect.provide(memoryLayer(config)),
+        )
+
+        expect(
+          yield* SystemContext.reconcile(
+            yield* sessionContext(config, session("/repo"), unreadableDirectory),
+            initialized.snapshot,
+          ),
+        ).toEqual({ _tag: "Unchanged" })
+
+        // The outage left the admitted state untouched, so recovery sees exactly one
+        // change against it rather than a removal followed by a re-add.
+        expect(yield* SystemContext.reconcile(yield* sessionContext(config), initialized.snapshot)).toEqual({
+          _tag: "Updated",
+          text: [
+            "These memories replace everything previously remembered about this user.",
+            "",
+            "Here is what you have been asked to remember about this user:",
+            `- [${written.id}] studies early in the morning`,
+          ].join("\n"),
+          snapshot: expect.any(Object),
+        })
+      }),
+    ),
+  )
+
+  it.live("adds nothing mid-session when memories were never admitted and cannot be read", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const initialized = yield* SystemContext.initialize(yield* sessionContext(config))
+        expect(initialized.snapshot).toEqual({})
+
+        // Unavailable context is omitted until it first loads successfully.
+        expect(
+          yield* SystemContext.reconcile(
+            yield* sessionContext(config, session("/repo"), unreadableDirectory),
+            initialized.snapshot,
+          ),
+        ).toEqual({ _tag: "Unchanged" })
+      }),
+    ),
+  )
+
+  it.live("blocks session start as a typed failure rather than crashing or starting without memories", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        // Deliberately strict: a baseline is never built while memories cannot be
+        // read, so a session cannot quietly begin without what it was told to keep.
+        const error = yield* SystemContext.initialize(
+          yield* sessionContext(config, session("/repo"), unreadableDirectory),
+        ).pipe(Effect.flip)
+        expect(error).toBeInstanceOf(SystemContext.InitializationBlocked)
+        expect(error.keys).toEqual([SystemContext.Key.make("core/memory")])
       }),
     ),
   )
