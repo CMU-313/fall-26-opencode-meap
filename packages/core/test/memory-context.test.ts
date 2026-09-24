@@ -10,6 +10,7 @@ import { Memory } from "@opencode-ai/core/memory"
 import { MemoryContext } from "@opencode-ai/core/memory-context"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SystemContext } from "@opencode-ai/core/system-context"
+import { SystemContextBuiltIns } from "@opencode-ai/core/system-context/builtins"
 import { SystemContextRegistry } from "@opencode-ai/core/system-context/registry"
 import { ProjectID } from "@opencode-ai/schema/project-id"
 import { location } from "./fixture/location"
@@ -437,6 +438,39 @@ describe("MemoryContext", () => {
         ).pipe(Effect.flip)
         expect(error).toBeInstanceOf(SystemContext.InitializationBlocked)
         expect(error.keys).toEqual([SystemContext.Key.make("core/memory")])
+      }),
+    ),
+  )
+
+  it.live("reaches the model through the built-in context sources every session loads", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "prefers hints over full answers", scope: "global" })),
+          Effect.provide(memoryLayer(config)),
+        )
+
+        // The same aggregate a real Location boots, rather than the memory source alone,
+        // so this fails if memory is ever dropped from the runtime graph.
+        const context = yield* SystemContextRegistry.Service.pipe(
+          Effect.flatMap((registry) => registry.load()),
+          Effect.provide(
+            AppNodeBuilder.build(LayerNode.group([SystemContextBuiltIns.node, SystemContextRegistry.node]), [
+              [Global.node, Global.layerWith({ config })],
+              [Location.node, session("/repo")],
+            ]),
+          ),
+        )
+        const baseline = (yield* SystemContext.initialize(context)).baseline
+        expect(baseline).toContain("<env>")
+        expect(
+          baseline.endsWith(
+            [
+              "Here is what you have been asked to remember about this user:",
+              `- [${written.id}] prefers hints over full answers`,
+            ].join("\n"),
+          ),
+        ).toBe(true)
       }),
     ),
   )
