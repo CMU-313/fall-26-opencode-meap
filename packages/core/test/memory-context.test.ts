@@ -172,4 +172,147 @@ describe("MemoryContext", () => {
       }),
     ),
   )
+
+  it.live("stays silent across turns when no memory has changed", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        // A project memory alongside a global one, so both branded ids have to survive
+        // the snapshot's JSON round trip. A decode failure would make reconcile rebuild
+        // the baseline rather than report no change.
+        yield* Memory.Service.pipe(
+          Effect.flatMap((memory) =>
+            Effect.all([
+              memory.write({ text: "prefers hints over full answers", scope: "global" }),
+              memory.write({
+                text: "is preparing for the dynamic programming midterm",
+                scope: "project",
+                project_id: ProjectID.make("prj_algorithms"),
+              }),
+            ]),
+          ),
+          Effect.provide(memoryLayer(config)),
+        )
+        const algorithms = session("/courses/algorithms", ProjectID.make("prj_algorithms"))
+
+        const initialized = yield* SystemContext.initialize(yield* sessionContext(config, algorithms))
+        expect(yield* SystemContext.reconcile(yield* sessionContext(config, algorithms), initialized.snapshot)).toEqual(
+          {
+            _tag: "Unchanged",
+          },
+        )
+      }),
+    ),
+  )
+
+  it.live("announces an edited memory mid-conversation instead of rebuilding the baseline", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "studies late at night", scope: "global" })),
+          Effect.provide(memoryLayer(config)),
+        )
+        const initialized = yield* SystemContext.initialize(yield* sessionContext(config))
+
+        yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.update(written.id, { text: "studies early in the morning" })),
+          Effect.provide(memoryLayer(config)),
+        )
+        const reconciled = yield* SystemContext.reconcile(yield* sessionContext(config), initialized.snapshot)
+        expect(reconciled).toEqual({
+          _tag: "Updated",
+          text: [
+            "These memories replace everything previously remembered about this user.",
+            "",
+            "Here is what you have been asked to remember about this user:",
+            `- [${written.id}] studies early in the morning`,
+          ].join("\n"),
+          snapshot: expect.any(Object),
+        })
+
+        // The following turn compares against the advanced snapshot and has nothing new to say.
+        if (reconciled._tag !== "Updated") return
+        expect(yield* SystemContext.reconcile(yield* sessionContext(config), reconciled.snapshot)).toEqual({
+          _tag: "Unchanged",
+        })
+      }),
+    ),
+  )
+
+  it.live("announces the first memory recorded in a session that started with none", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const initialized = yield* SystemContext.initialize(yield* sessionContext(config))
+        expect(initialized.baseline).toBe("")
+
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "prefers hints over full answers", scope: "global" })),
+          Effect.provide(memoryLayer(config)),
+        )
+        // With nothing previously admitted there is nothing to replace, so the message
+        // is the plain list rather than the replacement preamble.
+        expect(yield* SystemContext.reconcile(yield* sessionContext(config), initialized.snapshot)).toEqual({
+          _tag: "Updated",
+          text: [
+            "Here is what you have been asked to remember about this user:",
+            `- [${written.id}] prefers hints over full answers`,
+          ].join("\n"),
+          snapshot: expect.any(Object),
+        })
+      }),
+    ),
+  )
+
+  it.live("re-announces the remaining memories when one of several is deleted", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) =>
+            Effect.forEach(["keeps a paper notebook", "reviews with flashcards"], (text) =>
+              memory.write({ text, scope: "global" }),
+            ),
+          ),
+          Effect.provide(memoryLayer(config)),
+        )
+        const initialized = yield* SystemContext.initialize(yield* sessionContext(config))
+
+        yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.remove(written[0].id)),
+          Effect.provide(memoryLayer(config)),
+        )
+        // Some memories remain, so this is a replacement list, not the removal text.
+        expect(yield* SystemContext.reconcile(yield* sessionContext(config), initialized.snapshot)).toEqual({
+          _tag: "Updated",
+          text: [
+            "These memories replace everything previously remembered about this user.",
+            "",
+            "Here is what you have been asked to remember about this user:",
+            `- [${written[1].id}] reviews with flashcards`,
+          ].join("\n"),
+          snapshot: expect.any(Object),
+        })
+      }),
+    ),
+  )
+
+  it.live("emits the removal text when the last memory is deleted", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "prefers hints over full answers", scope: "global" })),
+          Effect.provide(memoryLayer(config)),
+        )
+        const initialized = yield* SystemContext.initialize(yield* sessionContext(config))
+
+        yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.remove(written.id)),
+          Effect.provide(memoryLayer(config)),
+        )
+        expect(yield* SystemContext.reconcile(yield* sessionContext(config), initialized.snapshot)).toEqual({
+          _tag: "Updated",
+          text: "Previously remembered notes about this user no longer apply.",
+          snapshot: {},
+        })
+      }),
+    ),
+  )
 })
