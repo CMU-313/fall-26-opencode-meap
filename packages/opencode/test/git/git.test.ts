@@ -115,6 +115,59 @@ describe("Git", () => {
     }),
   )
 
+  it.live("log() returns structured commit history", () =>
+    Effect.gen(function* () {
+      const tmp = yield* scopedTmpdir({ git: true })
+      yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "a.txt"), "one\n", "utf-8"))
+      yield* Effect.promise(() => $`git add .`.cwd(tmp.path).quiet())
+      yield* Effect.promise(() => $`git commit --no-gpg-sign -m "add a"`.cwd(tmp.path).quiet())
+
+      yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "b.txt"), "two\n", "utf-8"))
+      yield* Effect.promise(() => $`git add .`.cwd(tmp.path).quiet())
+      yield* Effect.promise(() => $`git commit --no-gpg-sign -m "add b"`.cwd(tmp.path).quiet())
+
+      const git = yield* Git.Service
+      const commits = yield* git.log(tmp.path, 5)
+
+      expect(commits).toHaveLength(3)
+      expect(commits[0].message).toBe("add b")
+      expect(commits[0].files).toEqual(
+        expect.arrayContaining([expect.objectContaining({ file: "b.txt", additions: 1, deletions: 0 })]),
+      )
+      expect(commits[1].message).toBe("add a")
+      expect(commits[1].hash).not.toBe(commits[0].hash)
+      expect(commits[0].author).toBeTruthy()
+      expect(commits[0].email).toBeTruthy()
+      expect(commits[0].date).toBeTruthy()
+    }),
+  )
+
+  it.live("log() respects the count parameter", () =>
+    Effect.gen(function* () {
+      const tmp = yield* scopedTmpdir({ git: true })
+      for (const name of ["a", "b", "c"]) {
+        yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, `${name}.txt`), name, "utf-8"))
+        yield* Effect.promise(() => $`git add .`.cwd(tmp.path).quiet())
+        yield* Effect.promise(() => $`git commit --no-gpg-sign -m "add ${name}"`.cwd(tmp.path).quiet())
+      }
+
+      const git = yield* Git.Service
+      const commits = yield* git.log(tmp.path, 2)
+      expect(commits).toHaveLength(2)
+      expect(commits[0].message).toBe("add c")
+      expect(commits[1].message).toBe("add b")
+    }),
+  )
+
+   it.live("log() returns empty array for non-git directories", () =>
+    Effect.gen(function* () {
+      const tmp = yield* scopedTmpdir()
+      const git = yield* Git.Service
+      const commits = yield* git.log(tmp.path)
+      expect(commits).toEqual([])
+    }),
+  )
+
   it.live("patch() returns capped native patch output", () =>
     Effect.gen(function* () {
       const tmp = yield* scopedTmpdir({ git: true })

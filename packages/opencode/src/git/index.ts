@@ -47,6 +47,15 @@ export type Stat = {
   readonly deletions: number
 }
 
+export type Commit = {
+  readonly hash: string
+  readonly author: string
+  readonly email: string
+  readonly date: string
+  readonly message: string
+  readonly files: Stat[]
+}
+
 export type Patch = {
   readonly text: string
   readonly truncated: boolean
@@ -83,6 +92,7 @@ export interface Interface {
   readonly status: (cwd: string) => Effect.Effect<Item[]>
   readonly diff: (cwd: string, ref: string) => Effect.Effect<Item[]>
   readonly stats: (cwd: string, ref: string) => Effect.Effect<Stat[]>
+  readonly log: (cwd: string, count?: number) => Effect.Effect<Commit[]>
   readonly patch: (cwd: string, ref: string, file: string, options?: PatchOptions) => Effect.Effect<Patch>
   readonly patchAll: (cwd: string, ref: string, options?: PatchOptions) => Effect.Effect<Patch>
   readonly patchUntracked: (cwd: string, file: string, options?: PatchOptions) => Effect.Effect<Patch>
@@ -260,6 +270,45 @@ const layer = Layer.effect(
       })
     })
 
+      const log = Effect.fn("Git.log")(function* (cwd: string, count = 5) {
+      const sep = "\x1f"
+      const result = yield* run(
+        ["log", `-n${count}`, `--pretty=format:%H${sep}%an${sep}%ae${sep}%aI${sep}%s`, "--numstat"],
+        { cwd },
+      )
+      if (result.exitCode !== 0) return []
+
+      const raw = result.text()
+      if (!raw.trim()) return []
+
+      return raw
+        .split(/\n\n+/)
+        .filter(Boolean)
+        .map((block) => {
+          const lines = block.split("\n").filter(Boolean)
+          const [hash, author, email, date, ...rest] = lines[0].split(sep)
+          const message = rest.join(sep)
+
+          const files = lines.slice(1).flatMap((line) => {
+            const parts = line.split("\t")
+            if (parts.length < 3) return []
+            const [adds, dels, file] = parts
+            const additions = adds === "-" ? 0 : Number.parseInt(adds, 10)
+            const deletions = dels === "-" ? 0 : Number.parseInt(dels, 10)
+            return [
+              {
+                file,
+                additions: Number.isFinite(additions) ? additions : 0,
+                deletions: Number.isFinite(deletions) ? deletions : 0,
+              } satisfies Stat,
+            ]
+          })
+
+          return { hash, author, email, date, message, files } satisfies Commit
+        })
+    })
+
+
     const patch = Effect.fn("Git.patch")(function* (cwd: string, ref: string, file: string, options?: PatchOptions) {
       const result = yield* run(
         ["diff", "--patch", "--no-ext-diff", "--no-renames", `--unified=${options?.context ?? 3}`, ref, "--", file],
@@ -334,6 +383,7 @@ const layer = Layer.effect(
       status,
       diff,
       stats,
+      log,
       patch,
       patchAll,
       patchUntracked,
