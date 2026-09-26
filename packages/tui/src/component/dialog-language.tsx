@@ -36,7 +36,6 @@ export function DialogLanguage() {
       current={sync.data.config.language ?? "English"}
       onSelect={(opt) => {
         dialog.clear()
-        // Saving to global config restarts server instances so the next prompt picks up the new language
         sdk.client.global.config
           .update({ config: { language: opt.value } }, { throwOnError: true })
           .then(() => toast.show({ message: `Responses will be in ${opt.value}`, variant: "info" }))

@@ -61,7 +61,6 @@ export const Prompt = Schema.Struct({
 export const Info = Schema.Struct({
   $schema: Schema.optional(Schema.String),
   theme: Schema.optional(Schema.String),
-  language: Schema.optional(Schema.String).annotate({ description: "TUI display language, e.g. 'es'" }),
   keybinds: Schema.optional(TuiKeybind.KeybindOverrides),
   plugin: Schema.optional(Schema.Array(PluginSpec)),
   plugin_enabled: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
