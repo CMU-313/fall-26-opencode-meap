@@ -87,6 +87,9 @@ export const Info = Schema.Struct({
   username: Schema.optional(Schema.String).annotate({
     description: "Custom username to display in conversations instead of system username",
   }),
+  language: Schema.optional(Schema.String).annotate({
+    description: "Language the AI should respond in, e.g. 'Spanish'",
+  }),
   mode: Schema.optional(
     Schema.StructWithRest(
       Schema.Struct({ build: Schema.optional(ConfigAgentV1.Info), plan: Schema.optional(ConfigAgentV1.Info) }),
