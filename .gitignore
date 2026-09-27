@@ -2,8 +2,12 @@ node_modules
 .DS_Store
 coverage
 coverage-html
+coverage_html
+.vscode
+.devcontainer
 *.lcov
 .turbo
 .qlty
 packages/sdk/js/tsconfig.tsbuildinfo
 test-results/.last-run.json
+opencode_stats_*
