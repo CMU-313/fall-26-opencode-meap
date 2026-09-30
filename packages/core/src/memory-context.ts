@@ -1,6 +1,7 @@
 export * as MemoryContext from "./memory-context"
 
 import { Effect, Layer, Schema } from "effect"
+import { Config } from "./config"
 import { makeLocationNode } from "./effect/app-node"
 import { Location } from "./location"
 import { Memory } from "./memory"
@@ -11,9 +12,15 @@ const key = SystemContext.Key.make("core/memory")
 
 const layer = Layer.effectDiscard(
   Effect.gen(function* () {
+    const config = yield* Config.Service
     const memory = yield* Memory.Service
     const location = yield* Location.Service
     const registry = yield* SystemContextRegistry.Service
+
+    // Configuration is read once when the location opens. Turning memory off registers no
+    // source at all, so memories are never read, and an unreadable memory directory
+    // cannot hold up session start either.
+    if (Config.latest(yield* config.entries(), "memory")?.enabled === false) return
 
     const source = (value: ReadonlyArray<Memory.Info> | SystemContext.Unavailable) =>
       SystemContext.make({
@@ -48,7 +55,7 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "memory-context",
   layer,
-  deps: [Memory.node, Location.node, SystemContextRegistry.node],
+  deps: [Config.node, Memory.node, Location.node, SystemContextRegistry.node],
 })
 
 // The id gives the model a handle on each memory, so it can recognize one that is

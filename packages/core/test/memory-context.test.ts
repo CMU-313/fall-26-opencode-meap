@@ -1,5 +1,6 @@
 import { describe, expect } from "bun:test"
 import { Effect, Layer } from "effect"
+import fs from "fs/promises"
 import path from "path"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -68,6 +69,13 @@ const withConfig = <A, E, R>(body: (config: string) => Effect.Effect<A, E, R>) =
     Effect.promise(() => tmpdir()),
     (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
   ).pipe(Effect.flatMap((tmp) => body(path.join(tmp.path, "config"))))
+
+// Writes the user-global settings file, where a student would turn memory on or off.
+const configure = (config: string, memory: object) =>
+  Effect.promise(async () => {
+    await fs.mkdir(config, { recursive: true })
+    await fs.writeFile(path.join(config, "opencode.json"), JSON.stringify({ memory }))
+  })
 
 describe("MemoryContext", () => {
   it.live("puts a memory written in one session into the baseline of the next", () =>
@@ -471,6 +479,76 @@ describe("MemoryContext", () => {
             ].join("\n"),
           ),
         ).toBe(true)
+      }),
+    ),
+  )
+
+  it.live("keeps memories out of the system context when memory is turned off", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "prefers hints over full answers", scope: "global" })),
+          Effect.provide(memoryLayer(config)),
+        )
+        yield* configure(config, { enabled: false })
+
+        const initialized = yield* SystemContext.initialize(yield* sessionContext(config))
+        expect(initialized.baseline).toBe("")
+        expect(initialized.snapshot).toEqual({})
+      }),
+    ),
+  )
+
+  it.live("delivers memories when memory is explicitly turned on", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "prefers hints over full answers", scope: "global" })),
+          Effect.provide(memoryLayer(config)),
+        )
+        yield* configure(config, { enabled: true })
+
+        expect((yield* SystemContext.initialize(yield* sessionContext(config))).baseline).toBe(
+          [
+            "Here is what you have been asked to remember about this user:",
+            `- [${written.id}] prefers hints over full answers`,
+          ].join("\n"),
+        )
+      }),
+    ),
+  )
+
+  it.live("lets a session start when memory is turned off even though its directory cannot be read", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        yield* configure(config, { enabled: false })
+
+        // With memory on, this directory would block session start. Turning it off is
+        // the way out, because the directory is then never read.
+        const initialized = yield* SystemContext.initialize(
+          yield* sessionContext(config, session("/repo"), unreadableDirectory),
+        )
+        expect(initialized.baseline).toBe("")
+      }),
+    ),
+  )
+
+  it.live("tells the model its memories no longer apply once memory is turned off", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "prefers hints over full answers", scope: "global" })),
+          Effect.provide(memoryLayer(config)),
+        )
+        const initialized = yield* SystemContext.initialize(yield* sessionContext(config))
+
+        // Settings are read when a location opens, so the next load sees the change.
+        yield* configure(config, { enabled: false })
+        expect(yield* SystemContext.reconcile(yield* sessionContext(config), initialized.snapshot)).toEqual({
+          _tag: "Updated",
+          text: "Previously remembered notes about this user no longer apply.",
+          snapshot: {},
+        })
       }),
     ),
   )
