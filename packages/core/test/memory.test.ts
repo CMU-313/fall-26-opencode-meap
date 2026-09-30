@@ -33,12 +33,6 @@ const failingLayer = (config: string, overrides: Partial<FSUtil.Interface>) =>
     ],
   ])
 
-const cappedLayer = (config: string, maxEntries: number) =>
-  AppNodeBuilder.build(LayerNode.group([Memory.node]), [
-    [Global.node, Global.layerWith({ config })],
-    [Memory.node, Memory.nodeWith({ maxEntries })],
-  ])
-
 const withConfig = <A, E, R>(body: (config: string) => Effect.Effect<A, E, R>) =>
   Effect.acquireRelease(
     Effect.promise(() => tmpdir()),
@@ -270,18 +264,19 @@ describe("Memory", () => {
   it.live("refuses a write at the cap and names a memory to delete rather than evicting one", () =>
     withConfig((config) =>
       Effect.gen(function* () {
-        const layer = cappedLayer(config, 2)
+        const layer = memoryLayer(config)
+        const cap = { maxEntries: 2 }
         const written = yield* Memory.Service.pipe(
           Effect.flatMap((memory) =>
             Effect.forEach(["keeps a paper notebook", "reviews with flashcards"], (text) =>
-              memory.write({ text, scope: "global" }),
+              memory.write({ text, scope: "global" }, cap),
             ),
           ),
           Effect.provide(layer),
         )
 
         const error = yield* Memory.Service.pipe(
-          Effect.flatMap((memory) => memory.write({ text: "one memory too many", scope: "global" })),
+          Effect.flatMap((memory) => memory.write({ text: "one memory too many", scope: "global" }, cap)),
           Effect.provide(layer),
           Effect.flip,
         )
@@ -304,9 +299,10 @@ describe("Memory", () => {
   it.live("accepts a write again once room has been made", () =>
     withConfig((config) =>
       Effect.gen(function* () {
-        const layer = cappedLayer(config, 1)
+        const layer = memoryLayer(config)
+        const cap = { maxEntries: 1 }
         const first = yield* Memory.Service.pipe(
-          Effect.flatMap((memory) => memory.write({ text: "keeps a paper notebook", scope: "global" })),
+          Effect.flatMap((memory) => memory.write({ text: "keeps a paper notebook", scope: "global" }, cap)),
           Effect.provide(layer),
         )
         yield* Memory.Service.pipe(
@@ -315,7 +311,7 @@ describe("Memory", () => {
         )
 
         const second = yield* Memory.Service.pipe(
-          Effect.flatMap((memory) => memory.write({ text: "reviews with flashcards", scope: "global" })),
+          Effect.flatMap((memory) => memory.write({ text: "reviews with flashcards", scope: "global" }, cap)),
           Effect.provide(layer),
         )
         expect(second.text).toBe("reviews with flashcards")
@@ -379,5 +375,95 @@ describe("Memory", () => {
       )
       expect(observed.map((item) => item.text)).toEqual(["prefers hints over full answers", "reviews with flashcards"])
     }),
+  )
+
+  it.live("applies the default cap when a write passes none", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        // Written straight to disk: going through write would re-read the directory
+        // for every one of them.
+        const ids = Array.from({ length: Memory.defaultMaxEntries }, (_, index) =>
+          Memory.ID.make(`mem_default${String(index).padStart(4, "0")}`),
+        )
+        yield* Effect.promise(async () => {
+          await fs.mkdir(path.join(config, "memory"), { recursive: true })
+          await Promise.all(
+            ids.map((id) =>
+              fs.writeFile(
+                path.join(config, "memory", `${id}.md`),
+                "---\nscope: global\ncreated: '2026-09-18T12:00:00.000Z'\n---\nfiller memory\n",
+              ),
+            ),
+          )
+        })
+
+        const error = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "one past the default", scope: "global" })),
+          Effect.provide(memoryLayer(config)),
+          Effect.flip,
+        )
+        expect(error).toBeInstanceOf(Memory.LimitExceededError)
+        expect(error.limit).toBe(Memory.defaultMaxEntries)
+        expect(error.oldest).toBe(ids[0])
+      }),
+    ),
+  )
+
+  it.live("treats a cap below one as one", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const layer = memoryLayer(config)
+        yield* Memory.Service.pipe(
+          Effect.flatMap((memory) =>
+            memory.write({ text: "keeps a paper notebook", scope: "global" }, { maxEntries: 0 }),
+          ),
+          Effect.provide(layer),
+        )
+
+        for (const maxEntries of [0, -5]) {
+          const error = yield* Memory.Service.pipe(
+            Effect.flatMap((memory) =>
+              memory.write({ text: "reviews with flashcards", scope: "global" }, { maxEntries }),
+            ),
+            Effect.provide(layer),
+            Effect.flip,
+          )
+          expect(error).toBeInstanceOf(Memory.LimitExceededError)
+          expect(error.limit).toBe(1)
+        }
+      }),
+    ),
+  )
+
+  it.live("takes the cap from each call rather than from the service", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const layer = memoryLayer(config)
+        yield* Memory.Service.pipe(
+          Effect.flatMap((memory) =>
+            Effect.forEach(["keeps a paper notebook", "reviews with flashcards"], (text) =>
+              memory.write({ text, scope: "global" }),
+            ),
+          ),
+          Effect.provide(layer),
+        )
+
+        // The same two memories under two different caps, as two projects with
+        // different settings would see one global memory store.
+        const refused = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "studies at night", scope: "global" }, { maxEntries: 2 })),
+          Effect.provide(layer),
+          Effect.flip,
+        )
+        expect(refused).toBeInstanceOf(Memory.LimitExceededError)
+        expect(refused.limit).toBe(2)
+
+        const accepted = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "studies at night", scope: "global" }, { maxEntries: 5 })),
+          Effect.provide(layer),
+        )
+        expect(accepted.text).toBe("studies at night")
+      }),
+    ),
   )
 })
