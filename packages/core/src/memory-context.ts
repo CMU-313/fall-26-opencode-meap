@@ -59,8 +59,9 @@ export const node = makeLocationNode({
 })
 
 // The id gives the model a handle on each memory, so it can recognize one that is
-// already recorded instead of writing a near duplicate.
-function render(memories: ReadonlyArray<Memory.Info>) {
+// already recorded instead of writing a near duplicate. Exported so the legacy session
+// engine shows the model exactly the same text as this context source.
+export function render(memories: ReadonlyArray<Memory.Info>) {
   return [
     "Here is what you have been asked to remember about this user:",
     ...memories.map((item) => `- [${item.id}] ${item.text}`),
