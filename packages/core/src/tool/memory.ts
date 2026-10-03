@@ -32,8 +32,10 @@ export const description = [
   "Record something about the user that should shape future conversations, such as how they like to study or be taught.",
   "Use it when the user asks you to remember something, or states a lasting preference about how they learn: for example, that they prefer hints over full answers, study in short blocks, or are preparing for a particular exam.",
   "Do not record one-off requests, details of the current task, or anything private or sensitive.",
-  "Memories already recorded are listed in your context; do not record one that is already there.",
+  "Memories already recorded are listed in your context. If what the user asks you to remember is already there, tell them it is already remembered instead of recording it again.",
   "Write each memory as one short sentence about the user. The user approves every memory before it is saved.",
+  "Saying you will remember something does not save it; only calling this tool does.",
+  "You cannot delete or change memories. If the user asks you to forget something, tell them they can delete or edit the memory files in ~/.config/opencode/memory/ (the default location), or turn memory off by setting memory.enabled to false in opencode.json. Do not promise to ignore memories: they are loaded into every new conversation until they are removed.",
 ].join(" ")
 
 const layer = Layer.effectDiscard(
