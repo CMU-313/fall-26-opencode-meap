@@ -5,6 +5,13 @@ import { InstanceRef } from "@/effect/instance-ref"
 import { Provider } from "@/provider/provider"
 import { Git, type Commit } from "@/git"
 
+const resolveLanguage = Effect.fn("Cli.catchup.resolveLanguage")(function* () {
+  const provider = yield* Provider.Service
+  const model = yield* provider.defaultModel()
+  const resolved = yield* provider.getModel(model.providerID, model.modelID)
+  return yield* provider.getLanguage(resolved)
+})
+
 export const CatchupCommand = effectCmd({
   command: "catchup",
   describe: "generate a plain-language summary of recent commits",
@@ -26,10 +33,18 @@ export const CatchupCommand = effectCmd({
       return
     }
 
-    const provider = yield* Provider.Service
-    const model = yield* provider.defaultModel()
-    const resolved = yield* provider.getModel(model.providerID, model.modelID)
-    const language = yield* provider.getLanguage(resolved)
+    const language = yield* resolveLanguage().pipe(
+      Effect.catch(() =>
+        Effect.sync(() => {
+          console.log(
+            "Could not resolve a model provider for catchup. Make sure opencode is authenticated with a provider (same setup needed for `opencode run`).",
+          )
+          return undefined
+        }),
+      ),
+    )
+
+    if (!language) return
 
     const prompt = buildPrompt(commits)
 
