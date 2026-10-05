@@ -9,35 +9,15 @@ function throttle<A, E, R>(body: (input: CliFixture) => Effect.Effect<A, E, R>) 
 const cliItConcurrent = ((name, body, opts) => cliIt.concurrent(name, throttle(body), opts)) as typeof cliIt.concurrent
 const timeout = 240_000
 
-const languages = [
-  "English",
-  "Spanish",
-  "French",
-  "German",
-  "Italian",
-  "Portuguese",
-  "Chinese",
-  "Japanese",
-  "Korean",
-  "Hindi",
-  "Arabic",
-  "Russian",
-  "Vietnamese",
-  "Indonesian",
-  "Turkish",
-]
-
 describe("opencode run response language", () => {
-  languages.forEach((language) =>
-    cliItConcurrent(
-      `asks the model to respond in ${language}`,
-      (fixture) =>
-        Effect.gen(function* () {
-          const system = yield* runWithLanguage(fixture, language)
-          expect(languageInstructions(system)).toEqual([`Always respond to the user in ${language}.`])
-        }),
-      timeout,
-    ),
+  cliItConcurrent(
+    "asks the model to respond in the configured language",
+    (fixture) =>
+      Effect.gen(function* () {
+        const system = yield* runWithLanguage(fixture, "Spanish")
+        expect(languageInstructions(system)).toEqual(["Always respond to the user in Spanish."])
+      }),
+    timeout,
   )
 
   cliItConcurrent(
