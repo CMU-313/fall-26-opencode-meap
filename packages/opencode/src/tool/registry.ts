@@ -12,6 +12,8 @@ import { ReadTool } from "./read"
 import { TaskTool } from "./task"
 import { Database } from "@opencode-ai/core/database/database"
 import { TodoWriteTool } from "./todo"
+import { MemoryTool } from "./memory"
+import { Memory } from "@opencode-ai/core/memory"
 import { WebFetchTool } from "./webfetch"
 import { WriteTool } from "./write"
 import { InvalidTool } from "./invalid"
@@ -98,6 +100,7 @@ const layer = Layer.effect(
     const read = yield* ReadTool
     const question = yield* QuestionTool
     const todo = yield* TodoWriteTool
+    const memorytool = yield* MemoryTool
     const lsptool = yield* LspTool
     const plan = yield* PlanExitTool
     const webfetch = yield* WebFetchTool
@@ -198,7 +201,9 @@ const layer = Layer.effect(
           }
         }
 
-        yield* config.get()
+        // Configuration is read when the instance starts, like the other settings here, so
+        // turning memory off removes the tool rather than offering one that then refuses.
+        const memoryEnabled = (yield* config.get()).memory?.enabled !== false
         const questionEnabled = ["app", "cli", "desktop"].includes(flags.client) || flags.enableQuestionTool
 
         const tool = yield* Effect.all({
@@ -212,6 +217,7 @@ const layer = Layer.effect(
           task: Tool.init(task),
           fetch: Tool.init(webfetch),
           todo: Tool.init(todo),
+          memory: Tool.init(memorytool),
           search: Tool.init(websearch),
           skill: Tool.init(skilltool),
           patch: Tool.init(patchtool),
@@ -235,6 +241,7 @@ const layer = Layer.effect(
             tool.task,
             tool.fetch,
             tool.todo,
+            ...(memoryEnabled ? [tool.memory] : []),
             tool.search,
             tool.skill,
             tool.patch,
@@ -427,6 +434,7 @@ export const node = LayerNode.make({
     Plugin.node,
     Question.node,
     Todo.node,
+    Memory.node,
     Agent.node,
     Skill.node,
     Session.node,

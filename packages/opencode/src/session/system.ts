@@ -17,6 +17,9 @@ import type { Provider } from "@/provider/provider"
 import type { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"
 import { Skill } from "@/skill"
+import { Config } from "@/config/config"
+import { Memory } from "@opencode-ai/core/memory"
+import { MemoryContext } from "@opencode-ai/core/memory-context"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { Location } from "@opencode-ai/core/location"
 import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/location-services"
@@ -46,6 +49,7 @@ export interface Interface {
   readonly environment: (model: Provider.Model) => Effect.Effect<string[]>
   readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
   readonly mcp: (agent: Agent.Info, permission?: PermissionV1.Ruleset) => Effect.Effect<string | undefined>
+  readonly memory: () => Effect.Effect<string | undefined>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SystemPrompt") {}
@@ -55,6 +59,8 @@ const layer = Layer.effect(
   Effect.gen(function* () {
     const skill = yield* Skill.Service
     const mcp = yield* MCP.Service
+    const config = yield* Config.Service
+    const memory = yield* Memory.Service
     const locations = yield* LocationServiceMap.Service
     const config = yield* Config.Service
 
@@ -130,6 +136,27 @@ const layer = Layer.effect(
           "</mcp_instructions>",
         ].join("\n")
       }),
+
+      // Rebuilt every step like the rest of this prompt, so an edit shows up on the next
+      // step. Unlike the v2 engine, an unreadable memory directory is not allowed to
+      // hold up the conversation: that step simply goes without memories.
+      memory: Effect.fn("SystemPrompt.memory")(function* () {
+        if ((yield* config.get()).memory?.enabled === false) return
+        const ctx = yield* InstanceState.context
+        const memories = yield* memory
+          .observe()
+          .pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("leaving memories out of the system prompt", { error }).pipe(
+                Effect.as([] as ReadonlyArray<Memory.Info>),
+              ),
+            ),
+          )
+        // Global memories follow the user everywhere; a project memory stays in its project.
+        const visible = memories.filter((item) => item.scope === "global" || item.project_id === ctx.project.id)
+        if (visible.length === 0) return
+        return MemoryContext.render(visible)
+      }),
     })
   }),
 )
@@ -143,7 +170,7 @@ const locationServiceMapNode = LayerNode.make({
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Skill.node, MCP.node, locationServiceMapNode, Config.node],
+  deps: [Skill.node, MCP.node, Config.node, Memory.node, locationServiceMapNode],
 })
 
 export * as SystemPrompt from "./system"

@@ -119,6 +119,9 @@ export const Plugin = define({
       { action: "read", resource: "*.env", effect: "ask" },
       { action: "read", resource: "*.env.*", effect: "ask" },
       { action: "read", resource: "*.env.example", effect: "allow" },
+      // Recording a memory asks by default, despite the allow-all above: a silently
+      // captured memory shapes every later conversation until someone finds it.
+      { action: "memory", resource: "*", effect: "ask" },
     ]
 
     yield* ctx.agent.transform((draft) => {

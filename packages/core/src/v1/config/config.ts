@@ -3,6 +3,7 @@ export * as ConfigV1 from "./config"
 import { Schema } from "effect"
 import { NonNegativeInt, PositiveInt, type DeepMutable } from "../../schema"
 import { ConfigExperimental } from "../../config/experimental"
+import { ConfigMemory } from "../../config/memory"
 import { ConfigReference } from "../../config/reference"
 import { ConfigAgentV1 } from "./agent"
 import { ConfigAttachmentV1 } from "./attachment"
@@ -169,6 +170,11 @@ export const Info = Schema.Struct({
       }),
     }),
   ),
+  // A plain struct over the shared fields: the legacy engine merges and mutates these
+  // objects, so it must not receive class instances.
+  memory: Schema.optional(Schema.Struct(ConfigMemory.Info.fields)).annotate({
+    description: "Persistent memory of study preferences across conversations",
+  }),
   experimental: Schema.optional(
     Schema.Struct({
       disable_paste_summary: Schema.optional(Schema.Boolean),

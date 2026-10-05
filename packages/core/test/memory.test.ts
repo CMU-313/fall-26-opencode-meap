@@ -1,0 +1,469 @@
+import { describe, expect } from "bun:test"
+import { Effect, Layer } from "effect"
+import { logLines } from "effect/testing/TestConsole"
+import fs from "fs/promises"
+import path from "path"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { FSUtil } from "@opencode-ai/core/fs-util"
+import { Global } from "@opencode-ai/core/global"
+import { Memory } from "@opencode-ai/core/memory"
+import { ProjectID } from "@opencode-ai/schema/project-id"
+import { tmpdir } from "./fixture/tmpdir"
+import { testEffect } from "./lib/effect"
+
+const it = testEffect(Layer.empty)
+
+// Each call compiles an independent layer over the same directory, so a second
+// call observes only what the first one durably wrote.
+const memoryLayer = (config: string) =>
+  AppNodeBuilder.build(LayerNode.group([Memory.node]), [[Global.node, Global.layerWith({ config })]])
+
+// Overrides single filesystem operations so an unreadable directory or file can be
+// observed without depending on real permissions.
+const failingLayer = (config: string, overrides: Partial<FSUtil.Interface>) =>
+  AppNodeBuilder.build(LayerNode.group([Memory.node]), [
+    [Global.node, Global.layerWith({ config })],
+    [
+      FSUtil.node,
+      Layer.effect(
+        FSUtil.Service,
+        FSUtil.Service.pipe(Effect.map((fs) => FSUtil.Service.of({ ...fs, ...overrides }))),
+      ).pipe(Layer.provide(LayerNode.compile(FSUtil.node))),
+    ],
+  ])
+
+const withConfig = <A, E, R>(body: (config: string) => Effect.Effect<A, E, R>) =>
+  Effect.acquireRelease(
+    Effect.promise(() => tmpdir()),
+    (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+  ).pipe(Effect.flatMap((tmp) => body(path.join(tmp.path, "config"))))
+
+describe("Memory", () => {
+  it.live("returns every written memory when read back from a fresh layer", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const texts = [
+          "prefers hints over full answers",
+          "studies in twenty five minute blocks",
+          "taking 15-451 this semester",
+        ]
+
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => Effect.forEach(texts, (text) => memory.write({ text, scope: "global" }))),
+          Effect.provide(memoryLayer(config)),
+        )
+        expect(written.map((item) => item.text)).toEqual(texts)
+        expect(written.every((item) => item.id.startsWith("mem_"))).toBe(true)
+
+        const listed = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.list()),
+          Effect.provide(memoryLayer(config)),
+        )
+        expect(listed.map((item) => item.text)).toEqual(texts)
+        expect(listed.map((item) => item.id)).toEqual(written.map((item) => item.id))
+        expect(listed.map((item) => item.scope)).toEqual(["global", "global", "global"])
+        expect(listed.every((item) => !Number.isNaN(Date.parse(item.created)))).toBe(true)
+      }),
+    ),
+  )
+
+  it.live("writes each memory as a hand editable markdown file under the config directory", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "prefers hints over full answers", scope: "global" })),
+          Effect.provide(memoryLayer(config)),
+        )
+
+        const file = path.join(config, "memory", `${written.id}.md`)
+        const raw = yield* Effect.promise(() => fs.readFile(file, "utf8"))
+        expect(raw.startsWith("---\n")).toBe(true)
+        // The file name is the only place the identity lives, so it cannot drift
+        // out of step with the frontmatter.
+        expect(raw).not.toContain("\nid:")
+        expect(raw).toContain("scope: global")
+        expect(raw).toContain(written.created)
+        // The body is the memory itself, so editing the file is editing the memory.
+        expect(raw.slice(raw.indexOf("\n---\n") + 5).trim()).toBe("prefers hints over full answers")
+      }),
+    ),
+  )
+
+  it.live("carries project scoped memories with the project that recorded them", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) =>
+            memory.write({ text: "this repo uses bun", scope: "project", project_id: ProjectID.make("prj_example") }),
+          ),
+          Effect.provide(memoryLayer(config)),
+        )
+        expect(written.scope).toBe("project")
+        expect(written.project_id).toBe(ProjectID.make("prj_example"))
+
+        const listed = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.list()),
+          Effect.provide(memoryLayer(config)),
+        )
+        expect(listed).toEqual([written])
+      }),
+    ),
+  )
+
+  it.live("changes the text of a memory without disturbing its identity", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "studies late at night", scope: "global" })),
+          Effect.provide(memoryLayer(config)),
+        )
+
+        const updated = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.update(written.id, { text: "studies early in the morning" })),
+          Effect.provide(memoryLayer(config)),
+        )
+        expect(updated.text).toBe("studies early in the morning")
+        expect(updated.id).toBe(written.id)
+        expect(updated.created).toBe(written.created)
+        expect(updated.scope).toBe(written.scope)
+
+        const listed = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.list()),
+          Effect.provide(memoryLayer(config)),
+        )
+        expect(listed).toEqual([updated])
+      }),
+    ),
+  )
+
+  it.live("removes a memory from disk so later layers no longer see it", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) =>
+            Effect.forEach(["keeps a paper notebook", "reviews with flashcards"], (text) =>
+              memory.write({ text, scope: "global" }),
+            ),
+          ),
+          Effect.provide(memoryLayer(config)),
+        )
+
+        yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.remove(written[0].id)),
+          Effect.provide(memoryLayer(config)),
+        )
+
+        const listed = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.list()),
+          Effect.provide(memoryLayer(config)),
+        )
+        expect(listed.map((item) => item.text)).toEqual(["reviews with flashcards"])
+        expect(yield* Effect.promise(() => fs.readdir(path.join(config, "memory")))).toEqual([`${written[1].id}.md`])
+      }),
+    ),
+  )
+
+  it.live("reports a missing memory instead of silently succeeding", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const missing = Memory.ID.make("mem_doesnotexist")
+
+        const updateError = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.update(missing, { text: "never recorded" })),
+          Effect.provide(memoryLayer(config)),
+          Effect.flip,
+        )
+        expect(updateError).toBeInstanceOf(Memory.NotFoundError)
+        expect(updateError.id).toBe(missing)
+
+        const removeError = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.remove(missing)),
+          Effect.provide(memoryLayer(config)),
+          Effect.flip,
+        )
+        expect(removeError).toBeInstanceOf(Memory.NotFoundError)
+      }),
+    ),
+  )
+
+  it.live("skips hand corrupted memory files with a warning and still loads the valid ones", () =>
+    Effect.gen(function* () {
+      const listed = yield* Memory.Service.pipe(
+        Effect.flatMap((memory) => memory.list()),
+        Effect.provide(memoryLayer(path.join(import.meta.dir, "fixtures", "memory-config"))),
+      )
+      expect(listed.map((item) => item.text)).toEqual(["prefers hints over full answers", "reviews with flashcards"])
+
+      const logged = JSON.stringify(yield* logLines)
+      expect(logged).toContain("WARN")
+      // One file loses its fields to an unterminated quote, the other carries an
+      // invalid scope. Both are named, so a vanished memory can be traced.
+      expect(logged).toContain("mem_0000000000000000000broken1.md")
+      expect(logged).toContain("mem_0000000000000000000broken2.md")
+      expect(logged).not.toContain("mem_00000000000000000000valid1.md")
+    }),
+  )
+
+  it.live("treats a memory file copied by hand as a separate memory", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "reviews with flashcards", scope: "global" })),
+          Effect.provide(memoryLayer(config)),
+        )
+        const copy = Memory.ID.make("mem_copiedbyhand000000000001")
+        yield* Effect.promise(() =>
+          fs.copyFile(path.join(config, "memory", `${written.id}.md`), path.join(config, "memory", `${copy}.md`)),
+        )
+
+        const listed = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.list()),
+          Effect.provide(memoryLayer(config)),
+        )
+        expect(listed.map((item) => item.id).toSorted()).toEqual([copy, written.id].toSorted())
+
+        // The copy is reachable in its own right rather than shadowed by the original.
+        yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.remove(copy)),
+          Effect.provide(memoryLayer(config)),
+        )
+        const remaining = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.list()),
+          Effect.provide(memoryLayer(config)),
+        )
+        expect(remaining.map((item) => item.id)).toEqual([written.id])
+      }),
+    ),
+  )
+
+  it.live("keeps a memory whose timestamp was left unquoted by hand", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const id = Memory.ID.make("mem_editedbyhand000000000001")
+        yield* Effect.promise(async () => {
+          await fs.mkdir(path.join(config, "memory"), { recursive: true })
+          // YAML reads this timestamp as a date rather than a string.
+          await fs.writeFile(
+            path.join(config, "memory", `${id}.md`),
+            "---\nscope: global\ncreated: 2026-09-18T12:00:00.000Z\n---\nprefers worked examples\n",
+          )
+        })
+
+        const listed = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.list()),
+          Effect.provide(memoryLayer(config)),
+        )
+        expect(listed.map((item) => item.text)).toEqual(["prefers worked examples"])
+        expect(listed[0].id).toBe(id)
+        expect(listed[0].created).toBe("2026-09-18T12:00:00.000Z")
+      }),
+    ),
+  )
+
+  it.live("refuses a write at the cap and names a memory to delete rather than evicting one", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const layer = memoryLayer(config)
+        const cap = { maxEntries: 2 }
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) =>
+            Effect.forEach(["keeps a paper notebook", "reviews with flashcards"], (text) =>
+              memory.write({ text, scope: "global" }, cap),
+            ),
+          ),
+          Effect.provide(layer),
+        )
+
+        const error = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "one memory too many", scope: "global" }, cap)),
+          Effect.provide(layer),
+          Effect.flip,
+        )
+        expect(error).toBeInstanceOf(Memory.LimitExceededError)
+        expect(error.limit).toBe(2)
+        expect(error.oldest).toBe(written[0].id)
+        expect(error.message).toContain(written[0].id)
+
+        // Nothing was evicted to make room, and the refused memory was not written.
+        const listed = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.list()),
+          Effect.provide(layer),
+        )
+        expect(listed.map((item) => item.text)).toEqual(["keeps a paper notebook", "reviews with flashcards"])
+        expect(yield* Effect.promise(() => fs.readdir(path.join(config, "memory")))).toHaveLength(2)
+      }),
+    ),
+  )
+
+  it.live("accepts a write again once room has been made", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const layer = memoryLayer(config)
+        const cap = { maxEntries: 1 }
+        const first = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "keeps a paper notebook", scope: "global" }, cap)),
+          Effect.provide(layer),
+        )
+        yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.remove(first.id)),
+          Effect.provide(layer),
+        )
+
+        const second = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "reviews with flashcards", scope: "global" }, cap)),
+          Effect.provide(layer),
+        )
+        expect(second.text).toBe("reviews with flashcards")
+      }),
+    ),
+  )
+
+  it.live("reports an unreadable memory directory instead of reporting no memories", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const layer = failingLayer(config, {
+          glob: () => Effect.fail(new FSUtil.FileSystemError({ method: "glob" })),
+        })
+
+        const error = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.observe()),
+          Effect.provide(layer),
+          Effect.flip,
+        )
+        expect(error).toBeInstanceOf(Memory.UnreadableError)
+        expect(error.path).toBe(path.join(config, "memory"))
+
+        // list stays total so a listing still shows whatever can be read.
+        expect(
+          yield* Memory.Service.pipe(
+            Effect.flatMap((memory) => memory.list()),
+            Effect.provide(layer),
+          ),
+        ).toEqual([])
+      }),
+    ),
+  )
+
+  it.live("reports a memory file that is listed but cannot be read", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const written = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "reviews with flashcards", scope: "global" })),
+          Effect.provide(memoryLayer(config)),
+        )
+        const layer = failingLayer(config, { readFileStringSafe: () => Effect.succeed(undefined) })
+
+        const error = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.observe()),
+          Effect.provide(layer),
+          Effect.flip,
+        )
+        expect(error).toBeInstanceOf(Memory.UnreadableError)
+        expect(error.path).toBe(path.join(config, "memory", `${written.id}.md`))
+      }),
+    ),
+  )
+
+  it.live("still skips a corrupt file rather than calling the whole directory unreadable", () =>
+    Effect.gen(function* () {
+      // Corruption and unreadability are different: the fixture directory holds two
+      // broken files, and observing it must still succeed with the valid two.
+      const observed = yield* Memory.Service.pipe(
+        Effect.flatMap((memory) => memory.observe()),
+        Effect.provide(memoryLayer(path.join(import.meta.dir, "fixtures", "memory-config"))),
+      )
+      expect(observed.map((item) => item.text)).toEqual(["prefers hints over full answers", "reviews with flashcards"])
+    }),
+  )
+
+  it.live("applies the default cap when a write passes none", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        // Written straight to disk: going through write would re-read the directory
+        // for every one of them.
+        const ids = Array.from({ length: Memory.defaultMaxEntries }, (_, index) =>
+          Memory.ID.make(`mem_default${String(index).padStart(4, "0")}`),
+        )
+        yield* Effect.promise(async () => {
+          await fs.mkdir(path.join(config, "memory"), { recursive: true })
+          await Promise.all(
+            ids.map((id) =>
+              fs.writeFile(
+                path.join(config, "memory", `${id}.md`),
+                "---\nscope: global\ncreated: '2026-09-18T12:00:00.000Z'\n---\nfiller memory\n",
+              ),
+            ),
+          )
+        })
+
+        const error = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "one past the default", scope: "global" })),
+          Effect.provide(memoryLayer(config)),
+          Effect.flip,
+        )
+        expect(error).toBeInstanceOf(Memory.LimitExceededError)
+        expect(error.limit).toBe(Memory.defaultMaxEntries)
+        expect(error.oldest).toBe(ids[0])
+      }),
+    ),
+  )
+
+  it.live("treats a cap below one as one", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const layer = memoryLayer(config)
+        yield* Memory.Service.pipe(
+          Effect.flatMap((memory) =>
+            memory.write({ text: "keeps a paper notebook", scope: "global" }, { maxEntries: 0 }),
+          ),
+          Effect.provide(layer),
+        )
+
+        for (const maxEntries of [0, -5]) {
+          const error = yield* Memory.Service.pipe(
+            Effect.flatMap((memory) =>
+              memory.write({ text: "reviews with flashcards", scope: "global" }, { maxEntries }),
+            ),
+            Effect.provide(layer),
+            Effect.flip,
+          )
+          expect(error).toBeInstanceOf(Memory.LimitExceededError)
+          expect(error.limit).toBe(1)
+        }
+      }),
+    ),
+  )
+
+  it.live("takes the cap from each call rather than from the service", () =>
+    withConfig((config) =>
+      Effect.gen(function* () {
+        const layer = memoryLayer(config)
+        yield* Memory.Service.pipe(
+          Effect.flatMap((memory) =>
+            Effect.forEach(["keeps a paper notebook", "reviews with flashcards"], (text) =>
+              memory.write({ text, scope: "global" }),
+            ),
+          ),
+          Effect.provide(layer),
+        )
+
+        // The same two memories under two different caps, as two projects with
+        // different settings would see one global memory store.
+        const refused = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "studies at night", scope: "global" }, { maxEntries: 2 })),
+          Effect.provide(layer),
+          Effect.flip,
+        )
+        expect(refused).toBeInstanceOf(Memory.LimitExceededError)
+        expect(refused.limit).toBe(2)
+
+        const accepted = yield* Memory.Service.pipe(
+          Effect.flatMap((memory) => memory.write({ text: "studies at night", scope: "global" }, { maxEntries: 5 })),
+          Effect.provide(layer),
+        )
+        expect(accepted.text).toBe("studies at night")
+      }),
+    ),
+  )
+})
