@@ -25,7 +25,6 @@ import { Location } from "@opencode-ai/core/location"
 import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/location-services"
 import { Reference } from "@opencode-ai/core/reference"
 import { MCP } from "@/mcp"
-import { Config } from "@/config/config"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 
 export function provider(model: Provider.Model) {
@@ -62,7 +61,6 @@ const layer = Layer.effect(
     const config = yield* Config.Service
     const memory = yield* Memory.Service
     const locations = yield* LocationServiceMap.Service
-    const config = yield* Config.Service
 
     return Service.of({
       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
@@ -70,7 +68,6 @@ const layer = Layer.effect(
         const references = yield* Effect.gen(function* () {
           return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
         }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
-        const cfg = yield* config.get()
         return [
           [
             `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
@@ -101,7 +98,6 @@ const layer = Layer.effect(
                   ]),
                 "</available_references>",
               ].join("\n"),
-          cfg.language ? `Always respond to the user in ${cfg.language}.` : undefined,
         ].filter((part): part is string => part !== undefined)
       }),
 
