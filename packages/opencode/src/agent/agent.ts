@@ -133,6 +133,9 @@ const layer = Layer.effect(
             "*.env.*": "ask",
             "*.env.example": "allow",
           },
+          // Recording a memory asks by default, despite the allow-all above: a silently
+          // captured memory shapes every later conversation until someone finds it.
+          memory: "ask",
         })
 
         const user = Permission.fromConfig(cfg.permission ?? {})

@@ -3,6 +3,7 @@ export * as ConfigV1 from "./config"
 import { Schema } from "effect"
 import { NonNegativeInt, PositiveInt, type DeepMutable } from "../../schema"
 import { ConfigExperimental } from "../../config/experimental"
+import { ConfigMemory } from "../../config/memory"
 import { ConfigReference } from "../../config/reference"
 import { ConfigAgentV1 } from "./agent"
 import { ConfigAttachmentV1 } from "./attachment"
@@ -87,6 +88,9 @@ export const Info = Schema.Struct({
   username: Schema.optional(Schema.String).annotate({
     description: "Custom username to display in conversations instead of system username",
   }),
+  language: Schema.optional(Schema.String).annotate({
+    description: "Language the AI should respond in, e.g. 'Spanish'",
+  }),
   mode: Schema.optional(
     Schema.StructWithRest(
       Schema.Struct({ build: Schema.optional(ConfigAgentV1.Info), plan: Schema.optional(ConfigAgentV1.Info) }),
@@ -166,6 +170,11 @@ export const Info = Schema.Struct({
       }),
     }),
   ),
+  // A plain struct over the shared fields: the legacy engine merges and mutates these
+  // objects, so it must not receive class instances.
+  memory: Schema.optional(Schema.Struct(ConfigMemory.Info.fields)).annotate({
+    description: "Persistent memory of study preferences across conversations",
+  }),
   experimental: Schema.optional(
     Schema.Struct({
       disable_paste_summary: Schema.optional(Schema.Boolean),

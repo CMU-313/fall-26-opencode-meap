@@ -357,6 +357,19 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
               }
             }
 
+            if (permission === "memory") {
+              const prompt = memoryPrompt(props.request)
+              return {
+                icon: "◆",
+                title: prompt.title,
+                body: (
+                  <box paddingLeft={1}>
+                    <text fg={theme.textMuted}>{prompt.detail}</text>
+                  </box>
+                ),
+              }
+            }
+
             if (permission === "doom_loop") {
               return {
                 icon: "⟳",
@@ -716,4 +729,18 @@ function Prompt<const T extends Record<string, string>>(props: {
       {content()}
     </Show>
   )
+}
+
+// What the approval prompt says when the model asks to remember something, so the
+// student sees exactly what would be kept, and where, before agreeing to it.
+export function memoryPrompt(request: Pick<PermissionRequest, "patterns" | "metadata">) {
+  const raw = request.metadata.text
+  const text = typeof raw === "string" ? raw : (request.patterns[0] ?? "")
+  return {
+    title: `Remember "${text}"`,
+    detail:
+      request.metadata.scope === "project"
+        ? "Kept for this project only, across future conversations"
+        : "Kept across all your projects and future conversations",
+  }
 }
