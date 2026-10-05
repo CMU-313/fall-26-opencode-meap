@@ -395,92 +395,123 @@ export function displayStats(stats: SessionStats, toolLimit?: number, modelLimit
 // describe the same numbers under the same names. Limits are applied here: an
 // absent --tools/--models means "everything", not "nothing" — unlike the
 // terminal renderer, where model output is opt-in.
+//
+// Every number below passes through round(), so no non-finite or
+// exponential-notation value can reach a consumer.
 export function shapeStats(stats: SessionStats, toolLimit?: number, modelLimit?: number) {
+  const tokens = {
+    input: round(stats.totalTokens.input, 0),
+    output: round(stats.totalTokens.output, 0),
+    reasoning: round(stats.totalTokens.reasoning, 0),
+    cache_read: round(stats.totalTokens.cache.read, 0),
+    cache_write: round(stats.totalTokens.cache.write, 0),
+  }
   return {
     meta: {
       generated_at: new Date().toISOString(),
-      days: stats.days,
-      // dateRange is seeded with Date.now()/0, so it is meaningless with no sessions.
-      earliest: stats.totalSessions === 0 ? "" : new Date(stats.dateRange.earliest).toISOString(),
-      latest: stats.totalSessions === 0 ? "" : new Date(stats.dateRange.latest).toISOString(),
+      days: round(stats.days, 0),
+      // dateRange is seeded with Date.now()/0, so it is meaningless with no
+      // sessions and may hold NaN when a session row is malformed.
+      earliest: stats.totalSessions === 0 ? "" : isoOrEmpty(stats.dateRange.earliest),
+      latest: stats.totalSessions === 0 ? "" : isoOrEmpty(stats.dateRange.latest),
     },
     overview: {
-      sessions: stats.totalSessions,
-      messages: stats.totalMessages,
+      sessions: round(stats.totalSessions, 0),
+      messages: round(stats.totalMessages, 0),
       cost_usd: round(stats.totalCost, 4),
       cost_per_day_usd: round(stats.costPerDay, 4),
       tokens_per_session: round(stats.tokensPerSession),
       median_tokens_per_session: round(stats.medianTokensPerSession),
     },
     tokens: {
-      input: stats.totalTokens.input,
-      output: stats.totalTokens.output,
-      reasoning: stats.totalTokens.reasoning,
-      cache_read: stats.totalTokens.cache.read,
-      cache_write: stats.totalTokens.cache.write,
-      total:
-        stats.totalTokens.input +
-        stats.totalTokens.output +
-        stats.totalTokens.reasoning +
-        stats.totalTokens.cache.read +
-        stats.totalTokens.cache.write,
+      ...tokens,
+      total: round(tokens.input + tokens.output + tokens.reasoning + tokens.cache_read + tokens.cache_write, 0),
     },
     models: Object.entries(stats.modelUsage)
       .sort(([, a], [, b]) => b.messages - a.messages)
-      .slice(0, modelLimit)
+      .slice(0, limitOf(modelLimit))
       .map(([id, usage]) => ({
         id,
-        messages: usage.messages,
-        input: usage.tokens.input,
-        output: usage.tokens.output,
-        cache_read: usage.tokens.cache.read,
-        cache_write: usage.tokens.cache.write,
+        messages: round(usage.messages, 0),
+        input: round(usage.tokens.input, 0),
+        output: round(usage.tokens.output, 0),
+        cache_read: round(usage.tokens.cache.read, 0),
+        cache_write: round(usage.tokens.cache.write, 0),
         cost_usd: round(usage.cost, 4),
       })),
     tools: Object.entries(stats.toolUsage)
       .sort(([, a], [, b]) => b - a)
-      .slice(0, toolLimit)
-      .map(([name, calls]) => ({ name, calls })),
+      .slice(0, limitOf(toolLimit))
+      .map(([name, calls]) => ({ name, calls: round(calls, 0) })),
   }
 }
 
 type ExportPayload = ReturnType<typeof shapeStats>
 
 // Aggregation emits NaN for empty datasets; JSON.stringify would turn that into
-// null and CSV into the literal "NaN", so collapse it at the boundary.
+// null and CSV into the literal "NaN".
 function round(value: number, places = 2) {
   if (!Number.isFinite(value)) return 0
   return Number(value.toFixed(places))
 }
 
-const writeExport = Effect.fn("Cli.stats.export.write")(function* (body: string, extension: string) {
-  const target = join(process.cwd(), `opencode_stats_${Date.now()}.${extension}`)
-  yield* Effect.promise(() => writeFile(target, body, "utf8"))
-  process.stderr.write(`Wrote ${target}\n`)
+// Dates outside the range Date accepts make toISOString throw, and epoch zero
+// is the aggregator's "unset" value rather than a real 1970 timestamp.
+function isoOrEmpty(value: number) {
+  if (!Number.isFinite(value) || value <= 0 || value > 8.64e15) return ""
+  return new Date(value).toISOString()
+}
+
+// slice(0, -1) trims from the end, so a negative limit would silently hide the
+// least-used entry. Treat anything that is not a count as "no limit".
+function limitOf(value?: number) {
+  if (value === undefined || !Number.isFinite(value) || value < 0) return undefined
+  return value
+}
+
+// Naming convention for exported files. Pure, so the convention can be
+// asserted without touching the filesystem.
+export function exportPath(extension: string, directory = process.cwd(), now = Date.now()) {
+  return join(directory, `opencode_stats_${now}.${extension}`)
+}
+
+export const writeExport = Effect.fn("Cli.stats.export.write")(function* (body: string, path: string) {
+  // A failed write is a user condition (read-only directory, full disk), not a
+  // bug, so it surfaces as a formatted CLI error rather than a defect.
+  yield* Effect.tryPromise({
+    try: () => writeFile(path, body, "utf8"),
+    catch: (cause) => new CliError({ message: `Could not write ${path}: ${cause}` }),
+  })
+  // stderr, not stdout, so `--export json` stays pipeable.
+  process.stderr.write(`Wrote ${path}\n`)
+  return path
 })
 
 export const jsonExportStats = Effect.fn("Cli.stats.export.json")(function* (
   stats: SessionStats,
   toolLimit?: number,
   modelLimit?: number,
+  path = exportPath("json"),
 ) {
-  yield* writeExport(JSON.stringify(shapeStats(stats, toolLimit, modelLimit), null, 2) + "\n", "json")
+  yield* writeExport(JSON.stringify(shapeStats(stats, toolLimit, modelLimit), null, 2) + "\n", path)
 })
 
 export const csvExportStats = Effect.fn("Cli.stats.export.csv")(function* (
   stats: SessionStats,
   toolLimit?: number,
   modelLimit?: number,
+  path = exportPath("csv"),
 ) {
-  yield* writeExport(renderCsv(shapeStats(stats, toolLimit, modelLimit)), "csv")
+  yield* writeExport(renderCsv(shapeStats(stats, toolLimit, modelLimit)), path)
 })
 
 export const mdExportStats = Effect.fn("Cli.stats.export.md")(function* (
   stats: SessionStats,
   toolLimit?: number,
   modelLimit?: number,
+  path = exportPath("md"),
 ) {
-  yield* writeExport(renderMarkdown(shapeStats(stats, toolLimit, modelLimit)), "md")
+  yield* writeExport(renderMarkdown(shapeStats(stats, toolLimit, modelLimit)), path)
 })
 
 // Tidy long format: one row per metric, so adding a metric adds rows rather than
@@ -546,6 +577,14 @@ export function renderMarkdown(data: ExportPayload) {
   ].join("\n")
 }
 
+// A pipe splits a GFM table cell even inside a code span, so it has to be
+// escaped; a value holding a backtick needs a longer fence than its wrapper.
+function mdCode(value: string) {
+  const escaped = value.replaceAll("|", "\\|")
+  if (!escaped.includes("`")) return `\`${escaped}\``
+  return `\`\` ${escaped} \`\``
+}
+
 function modelTable(models: ExportPayload["models"], n: (value: number) => string) {
   if (models.length === 0) return ["_No model usage recorded._", ""]
   return [
@@ -553,7 +592,7 @@ function modelTable(models: ExportPayload["models"], n: (value: number) => strin
     "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ...models.map(
       (model) =>
-        `| \`${model.id}\` | ${n(model.messages)} | ${n(model.input)} | ${n(model.output)} | ` +
+        `| ${mdCode(model.id)} | ${n(model.messages)} | ${n(model.input)} | ${n(model.output)} | ` +
         `${n(model.cache_read)} | ${n(model.cache_write)} | $${model.cost_usd} |`,
     ),
     "",
@@ -562,7 +601,12 @@ function modelTable(models: ExportPayload["models"], n: (value: number) => strin
 
 function toolTable(tools: ExportPayload["tools"], n: (value: number) => string) {
   if (tools.length === 0) return ["_No tool usage recorded._", ""]
-  return ["| Tool | Calls |", "| --- | ---: |", ...tools.map((tool) => `| \`${tool.name}\` | ${n(tool.calls)} |`), ""]
+  return [
+    "| Tool | Calls |",
+    "| --- | ---: |",
+    ...tools.map((tool) => `| ${mdCode(tool.name)} | ${n(tool.calls)} |`),
+    "",
+  ]
 }
 
 // Returns an Effect rather than running the work, so the CLI handler's runtime
@@ -573,14 +617,15 @@ export function reportStats(
   toolLimit?: number,
   modelLimit?: number,
   format?: string,
+  path?: string,
 ): Effect.Effect<void, CliError> {
   switch (format) {
     case "csv":
-      return csvExportStats(stats, toolLimit, modelLimit)
+      return csvExportStats(stats, toolLimit, modelLimit, path)
     case "md":
-      return mdExportStats(stats, toolLimit, modelLimit)
+      return mdExportStats(stats, toolLimit, modelLimit, path)
     case "json":
-      return jsonExportStats(stats, toolLimit, modelLimit)
+      return jsonExportStats(stats, toolLimit, modelLimit, path)
     default:
       return Effect.sync(() => displayStats(stats, toolLimit, modelLimit))
   }

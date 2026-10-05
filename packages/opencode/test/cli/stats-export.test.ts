@@ -1,8 +1,22 @@
-import { describe, expect, test } from "bun:test"
-import { renderCsv, renderMarkdown, shapeStats, type SessionStats } from "../../src/cli/cmd/stats"
+import { describe, expect, spyOn, test } from "bun:test"
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { Effect } from "effect"
+import {
+  csvExportStats,
+  exportPath,
+  jsonExportStats,
+  mdExportStats,
+  renderCsv,
+  renderMarkdown,
+  reportStats,
+  shapeStats,
+  writeExport,
+  type SessionStats,
+} from "../../src/cli/cmd/stats"
 
-// A model id containing a comma and a quote exercises CSV field escaping without
-// a separate contrived case.
+// A model id containing a comma and a quote exercises CSV field escaping
 const AWKWARD_MODEL = 'vendor/model,"v2"'
 
 function stats(overrides: Partial<SessionStats> = {}): SessionStats {
@@ -212,5 +226,192 @@ describe("stats export consistency", () => {
     const md = renderMarkdown(payload)
     expect(md).toContain(`$${payload.overview.cost_usd}`)
     expect(md).toContain(`$${payload.models[0].cost_usd}`)
+  })
+})
+
+/** Cell count of table row. Escaped pipes do not open a new cell. */
+function cells(row: string) {
+  return row.replaceAll("\\|", "").split("|").length
+}
+
+// These pin behavior the first ten tests leave open. Each one corresponds to a
+// path that currently either crashes, emits a non-number, or corrupts the
+// format it is writing.
+describe("stats export edge cases", () => {
+  test("a NaN token count never reaches the output", () => {
+    // round() guards `overview` but `tokens` is read raw, so a single bad
+    // counter becomes null in json and poisons the computed total.
+    const payload = shapeStats(stats({ totalTokens: { input: NaN, output: 5, reasoning: 0, cache: { read: 0, write: 0 } } }))
+
+    expect(Number.isFinite(payload.tokens.input)).toBe(true)
+    expect(Number.isFinite(payload.tokens.total)).toBe(true)
+
+    const json = JSON.stringify(payload)
+    expect(json).not.toContain("NaN")
+    expect(json).not.toContain("null")
+
+    for (const row of parseCsv(renderCsv(payload)).slice(1)) {
+      expect(row[3]).not.toBe("NaN")
+      expect(row[3]).not.toBe("null")
+    }
+  })
+
+  test("a malformed dateRange degrades instead of throwing", () => {
+    // new Date(NaN).toISOString() throws RangeError. The existing guard only
+    // covers totalSessions === 0, so one bad session row crashes the export.
+    const broken = stats({ dateRange: { earliest: NaN, latest: NaN } })
+    expect(() => shapeStats(broken)).not.toThrow()
+    expect(shapeStats(broken).meta.earliest).toBe("")
+    expect(shapeStats(broken).meta.latest).toBe("")
+  })
+
+  test("an epoch-zero dateRange is not reported as 1970", () => {
+    const payload = shapeStats(stats({ dateRange: { earliest: 0, latest: 0 } }))
+    expect(payload.meta.earliest).not.toContain("1970")
+    expect(payload.meta.latest).not.toContain("1970")
+  })
+
+  test("a model id containing a pipe does not break the markdown table", () => {
+    const payload = shapeStats(
+      stats({
+        modelUsage: {
+          "vendor|model": { messages: 1, tokens: { input: 1, output: 1, cache: { read: 0, write: 0 } }, cost: 0 },
+        },
+      }),
+    )
+    const md = renderMarkdown(payload)
+    const header = md.split("\n").find((line) => line.startsWith("| Model |"))
+    const row = md.split("\n").find((line) => line.includes("vendor"))
+
+    expect(header).toBeDefined()
+    expect(row).toBeDefined()
+    // Backticks do not protect pipes in GFM: an unescaped one adds a cell and
+    // shifts every column after it.
+    expect(cells(row!)).toBe(cells(header!))
+  })
+
+  test("a negative limit does not silently drop entries", () => {
+    // slice(0, -1) trims from the end, so --models -1 hides the least-used
+    // model instead of reporting a bad argument.
+    const full = shapeStats(stats())
+    const negative = shapeStats(stats(), -1, -1)
+
+    expect(negative.models).toHaveLength(full.models.length)
+    expect(negative.tools).toHaveLength(full.tools.length)
+  })
+
+  test("an Infinite aggregate collapses to zero like NaN does", () => {
+    const payload = shapeStats(stats({ totalCost: Infinity, costPerDay: -Infinity }))
+    expect(payload.overview.cost_usd).toBe(0)
+    expect(payload.overview.cost_per_day_usd).toBe(0)
+  })
+})
+
+// The export path is pure; the writers need a real file, so they get a tmpdir
+// each rather than writing into the package directory.
+async function scratchDir() {
+  return await mkdtemp(join(tmpdir(), "stats-export-"))
+}
+
+describe("stats export writers", () => {
+  test("exportPath builds the documented filename", () => {
+    expect(exportPath("csv", "/tmp/somewhere", 1700000000000)).toBe(
+      join("/tmp/somewhere", "opencode_stats_1700000000000.csv"),
+    )
+  })
+
+  test("exportPath defaults to the working directory and the current time", () => {
+    expect(exportPath("json", undefined, 1)).toBe(join(process.cwd(), "opencode_stats_1.json"))
+    expect(exportPath("md")).toStartWith(join(process.cwd(), "opencode_stats_"))
+    expect(exportPath("md")).toEndWith(".md")
+  })
+
+  test("each exporter writes its own format to the path it is given", async () => {
+    const directory = await scratchDir()
+    const fixture = stats()
+
+    const json = join(directory, "out.json")
+    await Effect.runPromise(jsonExportStats(fixture, undefined, undefined, json))
+    expect(JSON.parse(await readFile(json, "utf8")).overview.sessions).toBe(fixture.totalSessions)
+
+    const csv = join(directory, "out.csv")
+    await Effect.runPromise(csvExportStats(fixture, undefined, undefined, csv))
+    expect(await readFile(csv, "utf8")).toStartWith("scope,scope_id,metric,value")
+
+    const md = join(directory, "out.md")
+    await Effect.runPromise(mdExportStats(fixture, undefined, undefined, md))
+    expect(await readFile(md, "utf8")).toStartWith("# opencode usage stats")
+
+    await rm(directory, { recursive: true, force: true })
+  })
+
+  test("the json body ends with exactly one newline", async () => {
+    const directory = await scratchDir()
+    const target = join(directory, "out.json")
+    await Effect.runPromise(jsonExportStats(stats(), undefined, undefined, target))
+
+    const body = await readFile(target, "utf8")
+    expect(body.endsWith("}\n")).toBe(true)
+    expect(body.endsWith("}\n\n")).toBe(false)
+
+    await rm(directory, { recursive: true, force: true })
+  })
+
+  test("writeExport returns the path and announces it on stderr, not stdout", async () => {
+    const directory = await scratchDir()
+    const target = join(directory, "announced.json")
+
+    const err = spyOn(process.stderr, "write").mockImplementation(() => true)
+    const out = spyOn(process.stdout, "write").mockImplementation(() => true)
+    const returned = await Effect.runPromise(writeExport("{}", target))
+    const stderr = err.mock.calls.flat().join("")
+    const stdout = out.mock.calls.flat().join("")
+    err.mockRestore()
+    out.mockRestore()
+
+    expect(returned).toBe(target)
+    expect(stderr).toContain(target)
+    // stdout has to stay clean or `--export json | jq` breaks.
+    expect(stdout).not.toContain(target)
+
+    await rm(directory, { recursive: true, force: true })
+  })
+
+  test("an unwritable target fails as a CliError rather than a defect", async () => {
+    const directory = await scratchDir()
+    // Effect.result only captures typed failures — a defect would reject the
+    // promise instead, so a Failure here proves the error channel is typed.
+    const target = join(directory, "no-such-subdirectory", "out.json")
+    const result = await Effect.runPromise(Effect.result(writeExport("{}", target)))
+
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure") expect(result.failure.message).toContain("Could not write")
+
+    await rm(directory, { recursive: true, force: true })
+  })
+
+  test("reportStats dispatches to the requested format and writes nothing by default", async () => {
+    const directory = await scratchDir()
+    const fixture = stats()
+
+    for (const [format, marker] of [
+      ["json", '"overview"'],
+      ["csv", "scope,scope_id"],
+      ["md", "# opencode usage stats"],
+    ] as const) {
+      const target = join(directory, `dispatch.${format}`)
+      await Effect.runPromise(reportStats(fixture, undefined, undefined, format, target))
+      expect(await readFile(target, "utf8")).toContain(marker)
+    }
+
+    // The default branch renders to the terminal; silence it and assert that no
+    // file appeared, which covers the dispatch without asserting on displayStats.
+    const before = (await readdir(directory)).length
+    const log = spyOn(console, "log").mockImplementation(() => {})
+    await Effect.runPromise(reportStats(fixture, undefined, undefined, undefined, join(directory, "unused")))
+    log.mockRestore()
+    expect((await readdir(directory)).length).toBe(before)
+
+    await rm(directory, { recursive: true, force: true })
   })
 })
