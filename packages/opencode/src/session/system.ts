@@ -25,7 +25,6 @@ import { Location } from "@opencode-ai/core/location"
 import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/location-services"
 import { Reference } from "@opencode-ai/core/reference"
 import { MCP } from "@/mcp"
-import { Config } from "@/config/config"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 
 export function provider(model: Provider.Model) {
@@ -62,7 +61,6 @@ const layer = Layer.effect(
     const config = yield* Config.Service
     const memory = yield* Memory.Service
     const locations = yield* LocationServiceMap.Service
-    const config = yield* Config.Service
 
     return Service.of({
       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
