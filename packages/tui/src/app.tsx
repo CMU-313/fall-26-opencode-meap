@@ -45,7 +45,6 @@ import { DialogMcp } from "./component/dialog-mcp"
 import { DialogStatus } from "./component/dialog-status"
 import { DialogDebug } from "./component/dialog-debug"
 import { DialogThemeList } from "./component/dialog-theme-list"
-import { DialogLanguage } from "./component/dialog-language"
 import { DialogHelp } from "./ui/dialog-help"
 import { DialogAgent } from "./component/dialog-agent"
 import { DialogSessionList } from "./component/dialog-session-list"
@@ -124,7 +123,6 @@ const appBindingCommands = [
   "theme.switch",
   "theme.switch_mode",
   "theme.mode.lock",
-  "language.switch",
   "help.show",
   "docs.open",
   "diff.open",
@@ -786,15 +784,6 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         slashName: "themes",
         run: () => {
           dialog.replace(() => <DialogThemeList />)
-        },
-        category: "System",
-      },
-      {
-        name: "language.switch",
-        title: "Switch response language",
-        slashName: "language",
-        run: () => {
-          dialog.replace(() => <DialogLanguage />)
         },
         category: "System",
       },
