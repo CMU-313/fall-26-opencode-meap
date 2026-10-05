@@ -397,6 +397,50 @@ it.effect("updates global config and omits empty shell key in jsonc", () =>
   ),
 )
 
+it.effect("project language overrides global language", () =>
+  withConfigTree(
+    { global: { language: "Spanish" }, project: { language: "French" } },
+    Effect.gen(function* () {
+      expect((yield* Config.use.get()).language).toBe("French")
+    }),
+  ),
+)
+
+it.effect("project inherits global language when it sets none", () =>
+  withConfigTree(
+    { global: { language: "Spanish" }, project: { model: "test/model" } },
+    Effect.gen(function* () {
+      expect((yield* Config.use.get()).language).toBe("Spanish")
+    }),
+  ),
+)
+
+it.effect("updating global language keeps comments and other settings in jsonc", () =>
+  Effect.gen(function* () {
+    const dir = yield* tmpdirScoped()
+    const file = path.join(dir, "opencode.jsonc")
+    yield* FSUtil.use.writeWithDirs(
+      file,
+      '{\n  // preferred model\n  "model": "test/model",\n  "language": "Spanish"\n}\n',
+    )
+
+    const global = yield* withGlobalConfigDir(
+      dir,
+      Effect.gen(function* () {
+        yield* Config.use.updateGlobal({ language: "Japanese" })
+        return yield* Config.use.getGlobal()
+      }),
+    )
+
+    const written = yield* FSUtil.use.readFileString(file)
+    const parsed = ConfigParse.schema(ConfigV1.Info, ConfigParse.jsonc(written, file), file)
+    expect(written).toContain("// preferred model")
+    expect(parsed.language).toBe("Japanese")
+    expect(parsed.model).toBe("test/model")
+    expect(global.language).toBe("Japanese")
+  }),
+)
+
 it.instance(
   "loads formatter boolean config",
   Effect.gen(function* () {
@@ -1352,6 +1396,10 @@ test("config parser preserves permission order while rejecting unknown top-level
     const error = err as { data?: { issues?: Array<{ code?: string; keys?: string[]; path?: string[] }> } }
     expect(error.data?.issues?.[0]).toMatchObject({ code: "unrecognized_keys", keys: ["invalid_field"], path: [] })
   }
+})
+
+test("config parser rejects a language that is not a string", () => {
+  expect(() => ConfigParse.schema(ConfigV1.Info, { language: 5 }, "test")).toThrow()
 })
 
 // MCP config merging tests
