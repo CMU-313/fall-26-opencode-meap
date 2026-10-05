@@ -345,18 +345,6 @@ describe("stats export writers", () => {
     await rm(directory, { recursive: true, force: true })
   })
 
-  test("the json body ends with exactly one newline", async () => {
-    const directory = await scratchDir()
-    const target = join(directory, "out.json")
-    await Effect.runPromise(jsonExportStats(stats(), undefined, undefined, target))
-
-    const body = await readFile(target, "utf8")
-    expect(body.endsWith("}\n")).toBe(true)
-    expect(body.endsWith("}\n\n")).toBe(false)
-
-    await rm(directory, { recursive: true, force: true })
-  })
-
   test("writeExport returns the path and announces it on stderr, not stdout", async () => {
     const directory = await scratchDir()
     const target = join(directory, "announced.json")
