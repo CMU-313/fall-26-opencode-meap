@@ -6,7 +6,7 @@ own section.
 - [Export Stats](#export-stats)
 - [Persistent memory](#persistent-memory)
 - [Catching Up on Recent Commits](#catching-up-on-recent-commits)
-
+- [Change Model Language](#response-language)
 ---
 
 ## Export Stats
@@ -288,3 +288,95 @@ bun test test/cli/catchup.test.ts test/git/git.test.ts
 
 **Not covered automatically:** the quality and wording of a model's summary. Steps 1 and 2
 in Try it cover that.
+
+
+## Response Language
+
+  If you'd rather read opencode's answers in your own language, you can choose the
+  language it responds in. The choice is saved, so every later reply uses it, in every
+  project, until you change it.
+
+  Issues: #20 (settings config field for language choice). PRs: #36 (feature), #37 (edge
+  case tests and a fix for whitespace-only values).
+
+  ### Usage
+
+  In the TUI, type `/language`, type to filter the list, and press Enter. A toast confirms
+  _"Responses will be in Spanish"_. Built-in choices: English, Spanish, French, German,
+  Italian, Portuguese, Chinese, Japanese, Korean, Hindi, Arabic, Russian, Vietnamese,
+  Indonesian, Turkish.
+
+  `/language` saves the choice to `~/.config/opencode/opencode.json`. You can also set it
+  by hand there, or in a project's `opencode.json` to apply it to one project only. Any
+  language name works, including ones not in the list:
+
+  ```json
+  {
+    "language": "Brazilian Portuguese"
+  }
+  ```
+
+  A project's setting overrides the global one. With no `language` set, opencode answers in
+  English as before.
+
+  ### Setup
+
+  Replies need a model provider. If you haven't connected one, run opencode, type
+  `/connect`, search for **Google**, and paste a free Gemini key from
+  [Google AI Studio](https://aistudio.google.com). Then use `/models` to pick a Gemini text
+  model.
+
+  ### Try it
+
+| #   | Do                                                                          | Expect                                                                                                         |
+| --- | --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| 1   | With no `language` in any config, ask "hi"                                  | A reply in English                                                                                             |
+| 2   | Type `/language` and pick **Spanish**                                       | The toast _"Responses will be in Spanish"_, and `"language": "Spanish"` in `~/.config/opencode/opencode.json` |
+| 3   | Without restarting, ask "what is a closure?"                                | A reply in Spanish                                                                                             |
+| 4   | Quit, start opencode again, and ask anything                                | Still Spanish                                                                                                  |
+| 5   | Add `"language": "French"` to a project's `opencode.json` and restart there | Replies in French in that project; other projects stay Spanish                                                 |
+
+  Picking English saves `"English"` rather than clearing the setting; to remove it, delete
+  the `language` line from the config. How closely replies stick to the language depends on
+  the model, and code and command output are not translated.
+
+  ### Testing
+
+  The tests are in `packages/opencode/test/cli/run/language-process.test.ts` (6 tests),
+  `packages/opencode/test/config/config.test.ts` (13 language tests), and
+  `packages/tui/test/component/dialog-language.test.tsx` (2 tests). Run them from each
+  package directory:
+
+  ```bash
+  cd packages/opencode
+  bun test test/cli/run/language-process.test.ts
+  bun test test/config/config.test.ts -t language
+
+  cd ../tui
+  bun test test/component/dialog-language.test.tsx
+  ```
+
+ | File                                                      | Tests                                                                                                                                                                                                                                           |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/opencode/test/cli/run/language-process.test.ts` | Runs the real `opencode run` against a fake model and checks the system prompt: a configured language adds one instruction, custom names pass through, and no setting, an empty value, or a whitespace-only value adds nothing; a value with newlines stays on one line |
+| `packages/opencode/test/config/config.test.ts`            | Precedence (`.opencode` over project over global), updating the global language keeps comments and other settings and creates the file if missing, non-English names like `日本語` are kept, and non-string values are rejected                   |
+| `packages/tui/test/component/dialog-language.test.tsx`    | Choosing a language in `/language` sends one config update with that language and shows the success toast; a failed update shows an error toast                                                                                               |
+
+  **Why these tests are sufficient.**
+
+  1. **Every acceptance criterion in #20 has at least one named test.** Changing the
+     language changes the response language ("asks the model to respond in the configured
+     language", plus the dialog save test); with no setting, the app defaults to English
+     ("sends no language instruction when no language is configured"); and the setting
+     persists across sessions (the config update tests write the file and read it back, and
+     each CLI test starts a new process from the saved file).
+  2. **The tests use the real code paths:** the CLI tests run the actual binary and inspect
+     the request the model receives, and the TUI test renders the actual dialog and sends a
+     real config update request.
+  3. **The edge cases cover every way a bad value could reach the prompt:** each config
+     location, environment variables, wrong types, and empty or whitespace-only values.
+  4. **There is no automated test that calls a live model**, because its output varies and
+     would make CI flaky. The live path was checked by hand with a real model 
+
+  **Not covered automatically:** whether a given model actually replies in the chosen
+  language
