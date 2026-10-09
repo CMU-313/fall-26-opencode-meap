@@ -4,6 +4,8 @@ How to use and user test the features our team added to opencode. Each feature h
 own section.
 
 - [Export Stats](#export-stats)
+- [Persistent memory](#persistent-memory)
+- [Catching Up on Recent Commits](#catching-up-on-recent-commits)
 
 ---
 
@@ -39,7 +41,7 @@ These tests help to validate the initially outlined success criteria involving s
 
 ---
 
-- [Persistent memory](#persistent-memory)
+
 
 ---
 
@@ -200,3 +202,89 @@ both are tested.
 **Not covered automatically:** whether a given model _chooses_ to use its memory tool
 depends on the model, and that the TUI dialog displays the approval wording is checked by
 hand. Steps 1 and 2 in [Try it](#try-it) cover both.
+
+---
+
+## Catching Up on Recent Commits
+
+If you've been away from the project and want a quick, plain-language summary of what's
+changed, use the `catchup` command. It reads your recent git history and asks your
+configured model to summarize it.
+
+Issues: #25 (fetch and structure commit history), #26 (generate and display the summary).
+
+### Usage
+
+```bash
+opencode catchup
+```
+
+This summarizes the last 5 commits by default. To summarize a different number of
+commits, pass `--count`:
+
+```bash
+opencode catchup --count 10
+```
+
+### Setup
+
+`catchup` needs a model provider, the same setup `opencode run` already requires. If you
+haven't connected one, run opencode, type `/connect`, search for **Google**, and paste a
+free Gemini key from [Google AI Studio](https://aistudio.google.com). Then use `/models`
+to pick a Gemini text model. OpenCode Zen's free models only work from official opencode
+builds, not from this source checkout, so use your own key. If no provider is configured,
+`catchup` tells you it couldn't resolve a model instead of failing silently.
+
+### Try it
+
+| #   | Do                                                                             | Expect                                                                                           |
+| --- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| 1   | In a repo with a few commits, run `bun run src/index.ts catchup`               | A plain-language summary that groups related commits and describes what changed in the code      |
+| 2   | Compare it with `git log --oneline -5`                                         | Each point in the summary matches a real commit, in order, and nothing is invented               |
+| 3   | Run `bun run src/index.ts catchup --count 2`                                   | The summary covers only the two most recent commits                                              |
+| 4   | Run it from a folder that isn't a git repo, or a repo with no commits          | A message saying no commit history was found, and no model call is made                          |
+
+The wording of the summary varies between runs, since a model writes it. Example output:
+
+```
+Welcome back! Here is a summary of the project's progress since the initial setup:
+
+### Project Launch
+The repository was initialized with a full monorepo structure...
+
+### New "Catchup" Feature
+* Git History Integration: Added the ability for the system to fetch and read recent git logs.
+* Plain-Language Summaries: Created a new CLI command called `catchup`...
+```
+
+### Testing
+
+The tests are in `packages/opencode/test/cli/catchup.test.ts` (4 tests) and
+`packages/opencode/test/git/git.test.ts` (12 tests, 3 of them for `Git.Service.log()`).
+Run them from the package directory:
+
+```bash
+cd packages/opencode
+bun test test/cli/catchup.test.ts test/git/git.test.ts
+```
+
+| File                                         | Tests                                                                                                                                         |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/opencode/test/git/git.test.ts`     | `log()` parses hash, author, date, message, and changed files; a count limits how many commits come back; a non-git folder returns an empty list |
+| `packages/opencode/test/cli/catchup.test.ts` | The prompt includes each commit's hash, author, date, message, and per-file +/- stats; commits are ordered most recent first; commits with no file changes don't crash; the no-history case is handled |
+
+**Why these tests are sufficient.**
+
+1. **Every acceptance criterion in #25 and #26 has at least one named test**, covering
+   fetching and parsing commit history, building the prompt, and handling an empty history.
+2. **The tests cover what is deterministic and in our control:** the data handed to the
+   model is correctly structured, and the command exits cleanly when there is nothing to
+   summarize.
+3. **There is no automated test that calls a live model**, because its output varies and
+   would make CI flaky and dependent on network access and credentials.
+4. **The live path was checked by hand** with a real Gemini model against this repo's
+   actual commit history, and the summary was compared with `git log` (step 2 in
+   [Try it](#try-it-1) covers this).
+
+**Not covered automatically:** the quality and wording of a model's summary. Steps 1 and 2
+in Try it cover that.
