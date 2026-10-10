@@ -441,6 +441,89 @@ it.effect("updating global language keeps comments and other settings in jsonc",
   }),
 )
 
+it.effect(".opencode language overrides project and global language", () =>
+  withConfigTree(
+    { global: { language: "Spanish" }, project: { language: "French" }, local: { language: "German" } },
+    Effect.gen(function* () {
+      expect((yield* Config.use.get()).language).toBe("German")
+    }),
+  ),
+)
+
+it.effect("empty project language overrides global language", () =>
+  withConfigTree(
+    { global: { language: "Spanish" }, project: { language: "" } },
+    Effect.gen(function* () {
+      expect((yield* Config.use.get()).language).toBe("")
+    }),
+  ),
+)
+
+it.effect("project language is ignored when project config is disabled", () =>
+  withConfigTree(
+    { global: { language: "Spanish" }, project: { language: "French" } },
+    withProcessEnv(
+      "OPENCODE_DISABLE_PROJECT_CONFIG",
+      "true",
+      Effect.gen(function* () {
+        expect((yield* Config.use.get()).language).toBe("Spanish")
+      }),
+    ),
+  ),
+)
+
+it.effect("updating global language does not override project language", () =>
+  withConfigTree(
+    { global: { language: "Spanish" }, project: { language: "French" } },
+    Effect.gen(function* () {
+      yield* Config.use.updateGlobal({ language: "Japanese" })
+      expect((yield* Config.use.getGlobal()).language).toBe("Japanese")
+      expect((yield* Config.use.get()).language).toBe("French")
+    }),
+  ),
+)
+
+it.effect("updating global language creates config when none exists", () =>
+  Effect.gen(function* () {
+    const dir = yield* tmpdirScoped()
+    const global = yield* withGlobalConfigDir(
+      dir,
+      Effect.gen(function* () {
+        yield* Config.use.updateGlobal({ language: "Korean" })
+        return yield* Config.use.getGlobal()
+      }),
+    )
+
+    expect(global.language).toBe("Korean")
+    expect((yield* Effect.promise(() => fs.readdir(dir))).some((file) => file.startsWith("opencode.json"))).toBe(true)
+  }),
+)
+
+it.effect("updating global language preserves non-ASCII language names", () =>
+  withGlobalConfig({ config: { language: "Spanish" } }, () =>
+    Effect.gen(function* () {
+      yield* Config.use.updateGlobal({ language: "日本語" })
+      expect((yield* Config.use.getGlobal()).language).toBe("日本語")
+      yield* Config.use.updateGlobal({ language: "Español" })
+      expect((yield* Config.use.getGlobal()).language).toBe("Español")
+    }),
+  ),
+)
+
+it.instance("OPENCODE_CONFIG_CONTENT language substitutes {env:} tokens", () =>
+  withProcessEnv(
+    "TEST_LANGUAGE",
+    "Vietnamese",
+    withProcessEnv(
+      "OPENCODE_CONFIG_CONTENT",
+      JSON.stringify({ $schema: "https://opencode.ai/config.json", language: "{env:TEST_LANGUAGE}" }),
+      Effect.gen(function* () {
+        expect((yield* Config.use.get()).language).toBe("Vietnamese")
+      }),
+    ),
+  ),
+)
+
 it.instance(
   "loads formatter boolean config",
   Effect.gen(function* () {
@@ -1400,6 +1483,14 @@ test("config parser preserves permission order while rejecting unknown top-level
 
 test("config parser rejects a language that is not a string", () => {
   expect(() => ConfigParse.schema(ConfigV1.Info, { language: 5 }, "test")).toThrow()
+})
+
+test("config parser rejects a null language", () => {
+  expect(() => ConfigParse.schema(ConfigV1.Info, { language: null }, "test")).toThrow()
+})
+
+test("config parser rejects a list of languages", () => {
+  expect(() => ConfigParse.schema(ConfigV1.Info, { language: ["Spanish", "French"] }, "test")).toThrow()
 })
 
 // MCP config merging tests
