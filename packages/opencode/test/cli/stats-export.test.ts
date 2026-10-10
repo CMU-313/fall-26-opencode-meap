@@ -344,7 +344,6 @@ describe("stats export writers", () => {
 
     await rm(directory, { recursive: true, force: true })
   })
-
   test("writeExport returns the path and announces it on stderr, not stdout", async () => {
     const directory = await scratchDir()
     const target = join(directory, "announced.json")
