@@ -118,6 +118,56 @@ function occursOnce(text: string, search: string) {
   return index !== -1 && index === text.lastIndexOf(search)
 }
 
+// A 2–5 line block, nested up to three levels deep in the file's indent unit (2 or 4
+// spaces, or a tab), spliced in on its own lines. The search text keeps each line's code
+// but may swap its leading indentation. Either every line switches to another indent unit
+// (the interview's 2-space vs 4-space case), or each line independently keeps or changes
+// its indentation, which covers the AI getting just one line wrong.
+const reindentEdit = fc
+  .record({
+    before: indentedText,
+    after: indentedText,
+    lines: fc.array(
+      fc.tuple(
+        fc.integer({ min: 1, max: 3 }),
+        codeLine.map((line) => line.trim()).filter((line) => line !== ""),
+      ),
+      { minLength: 2, maxLength: 5 },
+    ),
+    fileUnit: fc.constantFrom("  ", "    ", "\t"),
+    searchIndents: fc.oneof(
+      indentation.map((unit) => ({ unit, perLine: [] })),
+      fc.array(fc.option(indentation, { freq: 2 }), { minLength: 5, maxLength: 5 }).map((perLine) => ({
+        unit: undefined,
+        perLine,
+      })),
+    ),
+    newString: spanText,
+  })
+  .map((edit) => {
+    const block = edit.lines.map(([depth, code]) => edit.fileUnit.repeat(depth) + code)
+    const search = edit.lines.map(([depth, code], i) => {
+      if (edit.searchIndents.unit !== undefined) return edit.searchIndents.unit.repeat(depth) + code
+      return (edit.searchIndents.perLine[i] ?? edit.fileUnit.repeat(depth)) + code
+    })
+    return {
+      file: edit.before + "\n" + block.join("\n") + "\n" + edit.after,
+      exact: block.join("\n"),
+      search: search.join("\n"),
+      newString: edit.newString,
+    }
+  })
+
+// R4's "no other block matches when indentation is ignored": the block's trimmed lines
+// appear as consecutive file lines exactly once.
+function matchesOnceIgnoringIndentation(file: string, block: string) {
+  const fileLines = file.split("\n").map((line) => line.trim())
+  const blockLines = block.split("\n").map((line) => line.trim())
+  return (
+    fileLines.filter((_, start) => blockLines.every((line, offset) => fileLines[start + offset] === line)).length === 1
+  )
+}
+
 describe("tool.edit properties", () => {
   // R1: "If an edit can't be applied, it is rejected with an error and the file is left
   // exactly as it was, never partially edited."
@@ -207,4 +257,37 @@ describe("tool.edit properties", () => {
       )
     }),
   )
+
+  // R4: "If the AI's search text differs from a multi-line block in the file only in leading
+  // indentation, no other block matches when indentation is ignored, and the search text
+  // doesn't itself appear exactly in the file, the edit gives the same result as the same
+  // edit with exact indentation."
+  // Kind: metamorphic. Changing only the search text's indentation must not change the output.
+  test("R4 (metamorphic): re-indenting the search text gives the same result", () => {
+    fc.assert(
+      fc.property(reindentEdit, (edit) => {
+        fc.pre(edit.search !== edit.exact && edit.newString !== edit.exact && edit.newString !== edit.search)
+        fc.pre(occursOnce(edit.file, edit.exact) && matchesOnceIgnoringIndentation(edit.file, edit.exact))
+        // An exact match always wins. Dropping only the first line's indentation makes the
+        // search text an exact match that starts partway into that line, which keeps the
+        // line's indentation on purpose (counterexample `"a\n  a"` in `"      a\n  a"`).
+        fc.pre(!edit.file.includes(edit.search))
+
+        expect(replace(edit.file, edit.search, edit.newString)).toBe(replace(edit.file, edit.exact, edit.newString))
+      }),
+      // The P3 acceptance example: a 2-space search against a 4-space block.
+      {
+        examples: [
+          [
+            {
+              file: "function f() {\n    if (x) {\n        y()\n    }\n}\n",
+              exact: "    if (x) {\n        y()\n    }",
+              search: "  if (x) {\n    y()\n  }",
+              newString: "    if (x) {\n        z()\n    }",
+            },
+          ],
+        ],
+      },
+    )
+  })
 })
