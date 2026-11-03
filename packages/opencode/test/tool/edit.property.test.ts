@@ -168,6 +168,28 @@ function matchesOnceIgnoringIndentation(file: string, block: string) {
   )
 }
 
+// A tiny alphabet so the old text overlaps itself ("aa" in "aaa"), sits next to itself, and
+// joins with neighbors or the new text to form the old text again. It also has `$`, `&`, `'`
+// and backticks, which code uses (shell, regex, template strings) and which JavaScript treats
+// as patterns in replacement strings. The file is filler joined by the old text, so the old
+// text always appears at least once, as R5's "appears in the file exactly" requires. The new
+// text may be empty, which makes the replace-all a deletion.
+const replaceAllUnit = fc.constantFrom("a", "b", "$", "&", "'", "`", " ", "\n")
+const replaceAllEdit = fc
+  .record({
+    filler: fc.array(
+      fc.array(replaceAllUnit, { maxLength: 6 }).map((units) => units.join("")),
+      { minLength: 2, maxLength: 5 },
+    ),
+    oldString: fc.array(replaceAllUnit, { minLength: 1, maxLength: 3 }).map((units) => units.join("")),
+    newString: fc.array(replaceAllUnit, { maxLength: 4 }).map((units) => units.join("")),
+  })
+  .map((edit) => ({
+    content: edit.filler.join(edit.oldString),
+    oldString: edit.oldString,
+    newString: edit.newString,
+  }))
+
 describe("tool.edit properties", () => {
   // R1: "If an edit can't be applied, it is rejected with an error and the file is left
   // exactly as it was, never partially edited."
@@ -286,6 +308,32 @@ describe("tool.edit properties", () => {
               newString: "    if (x) {\n        z()\n    }",
             },
           ],
+        ],
+      },
+    )
+  })
+
+  // R5: "When the old text appears in the file exactly, a replace-all gives the same file as
+  // replacing every non-overlapping occurrence from left to right, i.e.
+  // content.split(old).join(new)."
+  // Kind: model/oracle. split/join is the obviously correct replace-all.
+  test("R5 (model/oracle): replace-all matches content.split(old).join(new)", () => {
+    fc.assert(
+      fc.property(replaceAllEdit, (edit) => {
+        fc.pre(edit.newString !== edit.oldString)
+
+        expect(replace(edit.content, edit.oldString, edit.newString, true)).toBe(
+          edit.content.split(edit.oldString).join(edit.newString),
+        )
+      }),
+      // The P3 acceptance examples: three `total`s renamed to `sum`, and the new text
+      // joining the next character to form the old text again.
+      {
+        examples: [
+          [{ content: "let total = 0;\ntotal += x;\nreturn total;", oldString: "total", newString: "sum" }],
+          [{ content: "abb", oldString: "ab", newString: "a" }],
+          // Shrunk counterexample that found the bug: `$&` was read as "the matched text".
+          [{ content: "a", oldString: "a", newString: "$&" }],
         ],
       },
     )
