@@ -83,6 +83,41 @@ const notFoundEdit = fc
   .record({ content: codeText, oldString: unmatchableSearch, newString: codeText })
   .filter((edit) => edit.newString !== edit.oldString)
 
+// A file of indented lines (none, 2 or 4 spaces, or a tab) with A spliced in. A and B mix
+// code, indentation and newlines, so they range from one character to several lines and
+// often start or end in whitespace, which interviewees expected to survive the round trip.
+// The whole edit is then converted to LF or CRLF together. About three in four generated
+// cases meet R2's "each matches exactly once" condition; the rest are skipped by fc.pre.
+const indentation = fc.constantFrom("", "  ", "    ", "\t")
+const indentedText = fc
+  .array(
+    fc.tuple(indentation, codeLine).map(([indent, line]) => indent + line),
+    { maxLength: 6 },
+  )
+  .map((lines) => lines.join("\n"))
+const spanText = fc
+  .array(fc.oneof(codeUnit, fc.constant("\n"), indentation), { minLength: 1, maxLength: 12 })
+  .map((units) => units.join(""))
+  .filter((text) => text !== "")
+const roundTripEdit = fc
+  .record({
+    before: indentedText,
+    after: indentedText,
+    a: spanText,
+    b: spanText,
+    ending: fc.constantFrom("\n", "\r\n"),
+  })
+  .map((edit) => ({
+    file: (edit.before + edit.a + edit.after).replaceAll("\n", edit.ending),
+    a: edit.a.replaceAll("\n", edit.ending),
+    b: edit.b.replaceAll("\n", edit.ending),
+  }))
+
+function occursOnce(text: string, search: string) {
+  const index = text.indexOf(search)
+  return index !== -1 && index === text.lastIndexOf(search)
+}
+
 describe("tool.edit properties", () => {
   // R1: "If an edit can't be applied, it is rejected with an error and the file is left
   // exactly as it was, never partially edited."
@@ -122,6 +157,52 @@ describe("tool.edit properties", () => {
           // Each run goes through the full tool (stat, read, lock), so fewer runs than the
           // pure property keep the test fast.
           { numRuns: 50 },
+        ),
+      )
+    }),
+  )
+
+  // R2: "Applying A→B and then B→A returns the original file byte for byte, including
+  // whitespace when A and B each match exactly once."
+  // Kind: round-trip.
+  test("R2 (round-trip): replacing A with B and then B with A restores the file", () => {
+    fc.assert(
+      fc.property(roundTripEdit, (edit) => {
+        fc.pre(edit.a !== edit.b && occursOnce(edit.file, edit.a))
+        const changed = replace(edit.file, edit.a, edit.b)
+        fc.pre(occursOnce(changed, edit.b))
+
+        expect(replace(changed, edit.b, edit.a)).toBe(edit.file)
+      }),
+    )
+  })
+
+  // R2: "Applying A→B and then B→A returns the original file byte for byte, including
+  // whitespace when A and B each match exactly once."
+  // Kind: round-trip. Through the real edit tool, which also converts line endings and
+  // splits off a BOM before matching, so this checks those steps put the bytes back too.
+  it.instance("R2 (round-trip): two edits through the tool restore the file's bytes", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const services = yield* Effect.context<Effect.Services<ReturnType<typeof run>>>()
+      const filePath = path.join(test.directory, "file.txt")
+      yield* Effect.promise(() =>
+        fc.assert(
+          fc.asyncProperty(roundTripEdit, fc.boolean(), async (edit, bom) => {
+            fc.pre(edit.a !== edit.b && occursOnce(edit.file, edit.a))
+            fc.pre(occursOnce(replace(edit.file, edit.a, edit.b), edit.b))
+            await Bun.write(filePath, (bom ? "﻿" : "") + edit.file)
+            const before = await Bun.file(filePath).bytes()
+
+            await Effect.runPromiseWith(services)(run({ filePath, oldString: edit.a, newString: edit.b }))
+            await Effect.runPromiseWith(services)(run({ filePath, oldString: edit.b, newString: edit.a }))
+
+            expect(await Bun.file(filePath).bytes()).toEqual(before)
+          }),
+          // Two full tool runs per case, so fewer runs than the pure property. The example is
+          // the shrunk counterexample that found the line-ending bug: the first edit removes
+          // the file's only CRLF, and the second must put it back as CRLF, not LF.
+          { numRuns: 50, examples: [[{ file: "\r\n", a: "\r\n", b: "a" }, false]] },
         ),
       )
     }),
