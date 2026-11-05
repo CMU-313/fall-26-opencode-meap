@@ -2,9 +2,9 @@ import { test, expect } from "bun:test"
 import fc from "fast-check"
 import { evaluate, merge } from "../../src/permission"
 
-// Commands we exercise. These mirror what came up in interviews: a safe
+// Commands tested with, which mirror what came up in interviews: a safe
 // read (ls), a git command the TA wanted gated (S-6), and two rm variants
-// every interviewee worried about (S-1, C-8, O-4).
+// every interviewee brought up (S-1, C-8, O-4).
 const COMMANDS = ["ls", "git status", "git push origin main", "rm test.txt", "rm -rf /tmp/build"] as const
 
 const actionArb = fc.constantFrom("allow", "ask", "deny") as fc.Arbitrary<"allow" | "ask" | "deny">
