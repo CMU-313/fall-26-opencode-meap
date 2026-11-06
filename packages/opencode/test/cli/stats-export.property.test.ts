@@ -6,17 +6,11 @@ import { Effect } from "effect"
 import fc from "fast-check"
 import { exportStats, renderCsv, renderMarkdown, shapeStats, type SessionStats } from "../../src/cli/cmd/stats"
 
-// Property tests for traceability/pshan.md R1-R5. Each test name starts with
-// the requirement id and the property type so a failure maps straight back to
-// the traceability matrix.
-
 type Payload = ReturnType<typeof shapeStats>
 
-// Realistic magnitudes: token counts are integers, costs are dollars. Ids mix
-// in commas, quotes, pipes and backticks to exercise CSV and markdown escaping.
 const nat = (max: number) => fc.nat({ max })
 const real = (max: number) => fc.double({ min: 0, max, noNaN: true, noDefaultInfinity: true })
-// aggregateSessionStats divides by zero for empty datasets, so averages can be NaN
+
 const nanOr = (arb: fc.Arbitrary<number>) => fc.oneof(arb, fc.constant(NaN))
 const tokens = nat(1e12)
 const cache = fc.record({ read: tokens, write: tokens })
@@ -43,7 +37,6 @@ const statsArb: fc.Arbitrary<SessionStats> = fc.record({
 
 const EXAMPLE = fc.sample(statsArb, { numRuns: 1, seed: 1 })[0]
 
-/** generated_at is wall-clock time, so two exports never agree on it. */
 const withoutClock = (payload: Payload) => ({ ...payload, meta: { ...payload.meta, generated_at: "" } })
 
 const reversed = <T>(record: Record<string, T>) => Object.fromEntries(Object.entries(record).reverse())
@@ -107,7 +100,6 @@ function fromMarkdown(body: string) {
         .map((line) => line.slice(2, -2).split(/(?<!\\) \| /)),
     )
   const num = (cell: string) => Number(cell.replace(/[$,*]/g, ""))
-  // Undo mdCode(): strip the code fence, then unescape pipes
   const id = (cell: string) => (cell.startsWith("`` ") ? cell.slice(3, -3) : cell.slice(1, -1)).replaceAll("\\|", "|")
   const zip = (metrics: string[], cells: string[]) => Object.fromEntries(metrics.map((m, i) => [m, num(cells[i])]))
   return {
@@ -149,8 +141,8 @@ function statsFromPayload({ meta, overview, tokens, models, tools }: Payload): S
 }
 
 describe("stats export properties", () => {
-  // Acceptance: model A then B vs model B then A gives identical totals,
-  // averages and per-model rows. Tied rows may swap places; their values may not.
+  // Acceptance: using model A then B vs model B then A gives identical totals,
+  // averages, per-model rows. Tied rows may swap places; their values may not.
   test("R1 metamorphic: reversing model and tool order leaves the exported numbers and models unchanged", () => {
     fc.assert(
       fc.property(statsArb, (stats) => {
@@ -240,7 +232,7 @@ describe("stats export properties", () => {
     )
   })
 
-  test("R3 idempotent: re-exporting an exported csv reproduces it byte for byte", () => {
+  test("R3 idempotent: re-exporting an exported csv reproduces it exactly", () => {
     fc.assert(
       fc.property(statsArb, (stats) => {
         const once = shapeStats(stats)
