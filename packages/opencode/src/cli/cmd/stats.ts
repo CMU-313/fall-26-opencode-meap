@@ -6,7 +6,9 @@ import { Database } from "@opencode-ai/core/database/database"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { Project } from "@/project/project"
 import { InstanceRef } from "@/effect/instance-ref"
-import { writeFile } from "fs/promises"
+import { Config } from "@/config/config"
+import { Global } from "@opencode-ai/core/global"
+import { mkdir, writeFile } from "fs/promises"
 import { join } from "path"
 
 export interface SessionStats {
@@ -72,6 +74,15 @@ export const StatsCommand = effectCmd({
         describe: "export stats to a file as 'json', 'csv', or 'md'",
         type: "string",
         choices: ["json", "csv", "md"],
+      })
+      .option("out", {
+        describe: "directory to write exports to (default: stats_dir from config, else opencode's data dir)",
+        type: "string",
+      })
+      .option("overwrite", {
+        describe: "replace the previous export instead of writing a new timestamped file",
+        type: "boolean",
+        default: false,
       }),
   handler: Effect.fn("Cli.stats")(function* (args) {
     const ctx = yield* InstanceRef
@@ -84,7 +95,13 @@ export const StatsCommand = effectCmd({
       modelLimit = args.models
     }
 
-    yield* reportStats(stats, args.tools, modelLimit, args.export)
+    if (!args.export) return yield* reportStats(stats, args.tools, modelLimit)
+    const config = yield* Config.Service.use((cfg) => cfg.get())
+    yield* exportStats(stats, args.tools, modelLimit, args.export, {
+      out: args.out,
+      configured: config.stats_dir,
+      timestamp: args.overwrite ? undefined : Date.now(),
+    })
   }),
 })
 
@@ -420,8 +437,8 @@ export function shapeStats(stats: SessionStats, toolLimit?: number, modelLimit?:
       messages: round(stats.totalMessages, 0),
       cost_usd: round(stats.totalCost, 4),
       cost_per_day_usd: round(stats.costPerDay, 4),
-      tokens_per_session: round(stats.tokensPerSession),
-      median_tokens_per_session: round(stats.medianTokensPerSession),
+      tokens_per_session: round(stats.tokensPerSession, 4),
+      median_tokens_per_session: round(stats.medianTokensPerSession, 4),
     },
     tokens: {
       ...tokens,
@@ -469,11 +486,44 @@ function limitOf(value?: number) {
   return value
 }
 
-// Naming convention for exported files. Pure, so the convention can be
-// asserted without touching the filesystem.
-export function exportPath(extension: string, directory = process.cwd(), now = Date.now()) {
-  return join(directory, `opencode_stats_${now}.${extension}`)
+// Exports get their own folder so they never clutter a project root. --out wins
+// for one run, stats_dir in config sets it permanently.
+export const DEFAULT_EXPORT_DIR = join(Global.Path.data, "stats")
+
+export function resolveExportDir(out?: string, configured?: string) {
+  return out || configured || DEFAULT_EXPORT_DIR
 }
+
+export const prepareExportDir = Effect.fn("Cli.stats.export.dir")(function* (directory: string) {
+  yield* Effect.tryPromise({
+    try: () => mkdir(directory, { recursive: true }),
+    catch: (cause) => new CliError({ message: `Could not create ${directory}: ${cause}` }),
+  })
+  return directory
+})
+
+// Naming convention for exported files. Pure, so the convention can be
+// asserted without touching the filesystem. A timestamp (the default) keeps
+// every report; the fixed name (--overwrite) replaces the last one.
+export function exportPath(extension: string, directory = DEFAULT_EXPORT_DIR, timestamp?: number) {
+  const suffix = timestamp === undefined ? "" : `_${timestamp}`
+  return join(directory, `opencode_stats${suffix}.${extension}`)
+}
+
+// What `--export` does end to end: pick the directory, create it, name the file
+// and write it. Returns the path written.
+export const exportStats = Effect.fn("Cli.stats.export")(function* (
+  stats: SessionStats,
+  toolLimit: number | undefined,
+  modelLimit: number | undefined,
+  format: string,
+  options: { out?: string; configured?: string; timestamp?: number } = {},
+) {
+  const directory = yield* prepareExportDir(resolveExportDir(options.out, options.configured))
+  const path = exportPath(format, directory, options.timestamp)
+  yield* reportStats(stats, toolLimit, modelLimit, format, path)
+  return path
+})
 
 export const writeExport = Effect.fn("Cli.stats.export.write")(function* (body: string, path: string) {
   // A failed write is a user condition (read-only directory, full disk), not a
@@ -539,7 +589,7 @@ function csvField(value: string) {
 }
 
 export function renderMarkdown(data: ExportPayload) {
-  const n = (value: number) => value.toLocaleString("en-US")
+  const n = (value: number) => value.toLocaleString("en-US", { maximumFractionDigits: 4 })
   const window = data.meta.earliest ? ` · ${data.meta.earliest} → ${data.meta.latest}` : ""
   return [
     "# opencode usage stats",

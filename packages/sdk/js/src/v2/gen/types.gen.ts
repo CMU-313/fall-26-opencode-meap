@@ -2019,6 +2019,14 @@ export type Config = {
     preserve_recent_tokens?: number
     reserved?: number
   }
+  memory?: {
+    enabled?: boolean
+    /**
+     * Whether the memory applies everywhere or only to the project that recorded it
+     */
+    scope?: "global" | "project"
+    max_entries?: number
+  }
   experimental?: {
     disable_paste_summary?: boolean
     batch_tool?: boolean

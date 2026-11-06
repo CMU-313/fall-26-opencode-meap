@@ -88,6 +88,9 @@ export const Info = Schema.Struct({
   username: Schema.optional(Schema.String).annotate({
     description: "Custom username to display in conversations instead of system username",
   }),
+  stats_dir: Schema.optional(Schema.String).annotate({
+    description: "Directory `opencode stats --export` writes to. Defaults to a stats folder in opencode's data directory.",
+  }),
   language: Schema.optional(Schema.String).annotate({
     description: "Language the AI should respond in, e.g. 'Spanish'",
   }),
