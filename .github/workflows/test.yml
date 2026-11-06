@@ -64,6 +64,22 @@ jobs:
         # contention issue typecheck.yml already caps for tsgo.
         run: GITHUB_ACTIONS=false bun turbo test --concurrency=4
 
+      - name: Run property tests (verbose)
+        timeout-minutes: 10
+        # The step above uses --only-failures, and bun's console reporter never names passing tests,
+        # so re-run the fast-check property tests (*.property.test.ts) with the JUnit reporter and
+        # print every test case it recorded. Failures still print in full and fail the step.
+        working-directory: packages/opencode
+        run: |
+          set +e
+          bun test --timeout 300000 --reporter=junit --reporter-outfile=property-results.xml .property.test.ts
+          code=$?
+          echo "Property tests run (file | test | seconds | expect() calls):"
+          grep -oE '<testcase [^>]*>' property-results.xml \
+            | sed -E 's/.* name="([^"]*)".* time="([^"]*)".* file="([^"]*)".* assertions="([^"]*)".*/  \3 | \1 | \2 | \4/' \
+            | sed -e "s/&apos;/'/g" -e 's/&quot;/"/g' -e 's/&amp;/\&/g'
+          exit $code
+
       - name: Check generated client
         timeout-minutes: 5
         working-directory: packages/client
