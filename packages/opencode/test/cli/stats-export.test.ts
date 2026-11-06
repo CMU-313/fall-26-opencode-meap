@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
 import {
+  DEFAULT_EXPORT_DIR,
   csvExportStats,
   exportPath,
   jsonExportStats,
@@ -315,15 +316,15 @@ async function scratchDir() {
 
 describe("stats export writers", () => {
   test("exportPath builds the documented filename", () => {
+    expect(exportPath("csv", "/tmp/somewhere")).toBe(join("/tmp/somewhere", "opencode_stats.csv"))
     expect(exportPath("csv", "/tmp/somewhere", 1700000000000)).toBe(
       join("/tmp/somewhere", "opencode_stats_1700000000000.csv"),
     )
   })
 
-  test("exportPath defaults to the working directory and the current time", () => {
-    expect(exportPath("json", undefined, 1)).toBe(join(process.cwd(), "opencode_stats_1.json"))
-    expect(exportPath("md")).toStartWith(join(process.cwd(), "opencode_stats_"))
-    expect(exportPath("md")).toEndWith(".md")
+  test("exportPath defaults to the stats directory, not the working directory", () => {
+    expect(exportPath("json")).toBe(join(DEFAULT_EXPORT_DIR, "opencode_stats.json"))
+    expect(exportPath("md")).not.toStartWith(join(process.cwd(), "opencode_stats"))
   })
 
   test("each exporter writes its own format to the path it is given", async () => {
