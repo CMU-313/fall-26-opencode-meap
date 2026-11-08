@@ -14,6 +14,7 @@ import { Truncate } from "@/tool/truncate"
 import { SessionID, MessageID } from "../../src/session/schema"
 import * as Tool from "../../src/tool/tool"
 import { testEffect } from "../lib/effect"
+fc.configureGlobal({ seed: 42 })
 
 const ctx = {
   sessionID: SessionID.make("ses_test-edit-property"),
