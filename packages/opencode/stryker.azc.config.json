@@ -10,7 +10,9 @@
     "src/tool/edit.ts:128-143",
     "src/tool/edit.ts:163-163",
     "src/tool/edit.ts:252-294",
-    "src/tool/edit.ts:690-747"
+    "src/tool/edit.ts:690-690",
+    "src/tool/edit.ts:699-716",
+    "src/tool/edit.ts:722-739"
   ],
   "concurrency": 2,
   "reporters": ["html", "clear-text", "progress"]
