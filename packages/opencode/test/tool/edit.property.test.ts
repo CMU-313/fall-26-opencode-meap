@@ -112,6 +112,7 @@ const roundTripEdit = fc
     file: (edit.before + edit.a + edit.after).replaceAll("\n", edit.ending),
     a: edit.a.replaceAll("\n", edit.ending),
     b: edit.b.replaceAll("\n", edit.ending),
+    ending: edit.ending,
   }))
 
 function occursOnce(text: string, search: string) {
@@ -123,15 +124,21 @@ function occursOnce(text: string, search: string) {
 // spaces, or a tab), spliced in on its own lines. The search text keeps each line's code
 // but may swap its leading indentation. Either every line switches to another indent unit
 // (the interview's 2-space vs 4-space case), or each line independently keeps or changes
-// its indentation, which covers the AI getting just one line wrong.
+// its indentation, which covers the AI getting just one line wrong. The block sometimes
+// ends the file, with no line break after it, since the matcher has to reach the file's
+// last lines too. Block lines are sometimes closing brackets, so lines repeat the way
+// nested code does (`}` above `}`), which the fallback matchers can confuse.
 const reindentEdit = fc
   .record({
     before: indentedText,
-    after: indentedText,
+    after: fc.option(indentedText, { freq: 2 }),
     lines: fc.array(
       fc.tuple(
         fc.integer({ min: 1, max: 3 }),
-        codeLine.map((line) => line.trim()).filter((line) => line !== ""),
+        fc.oneof(
+          codeLine.map((line) => line.trim()).filter((line) => line !== ""),
+          fc.constantFrom("}", "};", ")"),
+        ),
       ),
       { minLength: 2, maxLength: 5 },
     ),
@@ -152,7 +159,7 @@ const reindentEdit = fc
       return (edit.searchIndents.perLine[i] ?? edit.fileUnit.repeat(depth)) + code
     })
     return {
-      file: edit.before + "\n" + block.join("\n") + "\n" + edit.after,
+      file: edit.before + "\n" + block.join("\n") + (edit.after === null ? "" : "\n" + edit.after),
       exact: block.join("\n"),
       search: search.join("\n"),
       newString: edit.newString,
@@ -208,14 +215,20 @@ describe("tool.edit properties", () => {
   // exactly as it was, never partially edited."
   // Kind: invariant. Runs the real edit tool against a temp file, with or without a BOM,
   // and compares raw bytes so line endings and the BOM count as part of "unchanged".
+  // Each edit carries the error it should get, so reporting an ambiguous edit as
+  // "not found" (or the reverse) fails: the message is how the AI knows what to fix.
   it.instance("R1 (invariant): a rejected edit leaves the file's bytes unchanged", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
       const services = yield* Effect.context<Effect.Services<ReturnType<typeof run>>>()
       const filePath = path.join(test.directory, "file.txt")
+      const rejectedEdit = fc.oneof(
+        notFoundEdit.map((edit) => ({ ...edit, error: "Could not find oldString" })),
+        ambiguousEdit.map((edit) => ({ ...edit, error: "Found multiple matches" })),
+      )
       yield* Effect.promise(() =>
         fc.assert(
-          fc.asyncProperty(fc.oneof(notFoundEdit, ambiguousEdit), fc.boolean(), async (edit, bom) => {
+          fc.asyncProperty(rejectedEdit, fc.boolean(), async (edit, bom) => {
             await Bun.write(filePath, (bom ? "﻿" : "") + edit.content)
             const before = await Bun.file(filePath).bytes()
 
@@ -224,7 +237,7 @@ describe("tool.edit properties", () => {
             )
 
             if (Exit.isSuccess(exit)) throw new Error("expected the edit to be rejected")
-            expect(String(Cause.squash(exit.cause))).toMatch(/Could not find oldString|Found multiple matches/)
+            expect(String(Cause.squash(exit.cause))).toContain(edit.error)
             expect(await Bun.file(filePath).bytes()).toEqual(before)
           }),
           // Each run goes through the full tool (stat, read, lock), so fewer runs than the
@@ -254,6 +267,8 @@ describe("tool.edit properties", () => {
   // whitespace when A and B each match exactly once."
   // Kind: round-trip. Through the real edit tool, which also converts line endings and
   // splits off a BOM before matching, so this checks those steps put the bytes back too.
+  // The AI's text gets its own line ending, independent of the file's, because AI tools
+  // often send LF text for a CRLF file (or the reverse) and the tool must convert it.
   it.instance("R2 (round-trip): two edits through the tool restore the file's bytes", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
@@ -261,21 +276,32 @@ describe("tool.edit properties", () => {
       const filePath = path.join(test.directory, "file.txt")
       yield* Effect.promise(() =>
         fc.assert(
-          fc.asyncProperty(roundTripEdit, fc.boolean(), async (edit, bom) => {
-            fc.pre(edit.a !== edit.b && occursOnce(edit.file, edit.a))
-            fc.pre(occursOnce(replace(edit.file, edit.a, edit.b), edit.b))
-            await Bun.write(filePath, (bom ? "﻿" : "") + edit.file)
-            const before = await Bun.file(filePath).bytes()
+          fc.asyncProperty(
+            roundTripEdit,
+            fc.boolean(),
+            fc.constantFrom("\n", "\r\n"),
+            async (edit, bom, aiEnding) => {
+              fc.pre(edit.a !== edit.b && occursOnce(edit.file, edit.a))
+              const changed = replace(edit.file, edit.a, edit.b)
+              fc.pre(occursOnce(changed, edit.b))
+              // If the first edit leaves no line breaks, nothing in the file says it used
+              // CRLF, so text from an AI using the other ending can't be converted back.
+              fc.pre(aiEnding === edit.ending || changed.includes("\n"))
+              const a = edit.a.replaceAll("\r\n", "\n").replaceAll("\n", aiEnding)
+              const b = edit.b.replaceAll("\r\n", "\n").replaceAll("\n", aiEnding)
+              await Bun.write(filePath, (bom ? "﻿" : "") + edit.file)
+              const before = await Bun.file(filePath).bytes()
 
-            await Effect.runPromiseWith(services)(run({ filePath, oldString: edit.a, newString: edit.b }))
-            await Effect.runPromiseWith(services)(run({ filePath, oldString: edit.b, newString: edit.a }))
+              await Effect.runPromiseWith(services)(run({ filePath, oldString: a, newString: b }))
+              await Effect.runPromiseWith(services)(run({ filePath, oldString: b, newString: a }))
 
-            expect(await Bun.file(filePath).bytes()).toEqual(before)
-          }),
+              expect(await Bun.file(filePath).bytes()).toEqual(before)
+            },
+          ),
           // Two full tool runs per case, so fewer runs than the pure property. The example is
           // the shrunk counterexample that found the line-ending bug: the first edit removes
           // the file's only CRLF, and the second must put it back as CRLF, not LF.
-          { numRuns: 50, examples: [[{ file: "\r\n", a: "\r\n", b: "a" }, false]] },
+          { numRuns: 50, examples: [[{ file: "\r\n", a: "\r\n", b: "a", ending: "\r\n" }, false, "\r\n"]] },
         ),
       )
     }),
