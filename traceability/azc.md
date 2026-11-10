@@ -12,7 +12,7 @@
 | R4 | C-11: "the spacing and indentation shouldn't change"; O-11; S-32: "If it did other things like added new lines that he didn't have, he'd be annoyed" | If the AI's search text differs from a multi-line block in the file only in leading indentation, no other block matches when indentation is ignored, and the search text doesn't itself appear exactly in the file, the edit gives the same result as the same edit with exact indentation. | An edit whose search text is a 3-line block with 2-space indentation, applied to a file where that block appears once with 4-space indentation, gives the same result as the same edit with exact 4-space indentation. A search that only drops the first line's indentation, such as `"a\n  a"` against `"      a\n  a"`, is an exact match and keeps that line's indentation. | Yes (twice: steps 1 and 3) | For any multi-line block that is the only match when indentation is ignored, changing the search text's indentation (without making it an exact match) doesn't change `replace`'s result for the same new text, including blocks that end the file and blocks with repeated lines such as closing brackets (metamorphic) | [`edit.property.test.ts`](../packages/opencode/test/tool/edit.property.test.ts): "R4 (metamorphic): re-indenting the search text gives the same result" | [H4](../mutants/azc/H4.patch) |
 | R5 | S-39: "look at all the callers and the original function to make sure that they're all changed"; S-41: "convert most of these changes into some kind of regex find search and then… check all of the substrings" | When the old text appears in the file exactly, a replace-all gives the same file as replacing every non-overlapping occurrence from left to right, i.e. `content.split(old).join(new)`. | After a replace-all from `total` to `sum` in a file with three `total`s and no `sum`, the result equals `content.split("total").join("sum")`: no `total` and three `sum`s. `replace("abb", "ab", "a", true)` returns `"ab"`, which equals `"abb".split("ab").join("a")`. | Yes | For any content that contains the old text, `replace(content, old, new, true) === content.split(old).join(new)` (model/oracle) | [`edit.property.test.ts`](../packages/opencode/test/tool/edit.property.test.ts): "R5 (model/oracle): replace-all matches content.split(old).join(new)" | [H5](../mutants/azc/H5.patch) |
 
-Properties written or suggested by opencode or another AI tool: R1, R2, R4, R5 (properties and generators written by Claude Code); R3, R4, R5 (requirement revisions suggested by Claude Code); R1, R2, R4 (P5 strengthening against Stryker survivors written by Claude Code)
+Properties written or suggested by opencode or another AI tool: R1, R2, R4, R5 (properties and generators written by Claude Code); R3, R4, R5 (requirement revisions suggested by Claude Code);
 
 ## Requirement changes
 
@@ -101,3 +101,61 @@ Seed: 42
 | Run | Killed | Survived | Equivalent | Score as Stryker reports it | Score excluding equivalent mutants |
 |---|---|---|---|---|---|
 | After strengthening | 98 | 5 | 0 | 95.15% | 95.15% (98 / 103) |
+
+## Agent Failure Case
+
+### Transcript that the property was generated from
+
+The R2 tool-level property and its generator, `roundTripEdit`, were written by Claude Code during P4 (2026-11-03). In these excerpts it ran the property, found the CRLF bug and fixed `edit.ts`, but kept a generator that converts the file and the AI's text to the same line ending.
+
+![Claude Code explains how it will check R2](azc-agent-failure/transcript-1.png)
+![Claude Code reports the CRLF counterexample and proposes a fix](azc-agent-failure/transcript-2.png)
+![Claude Code says the bug belongs in edit.ts, not the test](azc-agent-failure/transcript-3.png)
+![Claude Code reports the edit.ts fix and the fixed example](azc-agent-failure/transcript-4.png)
+
+### Surviving mutant
+
+[`agent-failure.patch`](../mutants/azc/agent-failure.patch), Stryker's block-statement mutant at `edit.ts:26`: `detectLineEnding` always returns `undefined`, so the tool never converts the AI's line endings to match the file.
+
+```diff
+-function detectLineEnding(text: string): "\n" | "\r\n" | undefined {
+-  if (text.includes("\r\n")) return "\r\n"
+-  if (text.includes("\n")) return "\n"
+-  return undefined
+-}
++function detectLineEnding(text: string): "\n" | "\r\n" | undefined {}
+```
+
+The three other `detectLineEnding` mutants at lines 27–28 (see Strengthening) survived for the same reason.
+
+### Why the property was too weak
+
+The property was too weak because the generator itself never reached the property. What it did was that it only applied one ending to the file, and since the text always matched the file, the conversion never did anything. Thus, when you just emptied the check for it, the property itself never actually noticed. However, once the actual generator was fixed, the comparison itself was fine, signaling that it was actually a generator failure.
+
+### Strengthened version
+
+The R2 tool test now picks the AI's line ending independently of the file's (commit `ae5c384`):
+
+```ts
+fc.asyncProperty(
+  roundTripEdit,
+  fc.boolean(),
+  fc.constantFrom("\n", "\r\n"),
+  async (edit, bom, aiEnding) => {
+    fc.pre(edit.a !== edit.b && occursOnce(edit.file, edit.a))
+    const changed = replace(edit.file, edit.a, edit.b)
+    fc.pre(occursOnce(changed, edit.b))
+    // If the first edit leaves no line breaks, nothing in the file says it used
+    // CRLF, so text from an AI using the other ending can't be converted back.
+    fc.pre(aiEnding === edit.ending || changed.includes("\n"))
+    const a = edit.a.replaceAll("\r\n", "\n").replaceAll("\n", aiEnding)
+    const b = edit.b.replaceAll("\r\n", "\n").replaceAll("\n", aiEnding)
+    // ...write the file, run A→B and B→A through the tool, compare bytes
+  },
+)
+```
+
+### Evidence that it kills the mutant
+
+- **Stryker:** all four `detectLineEnding` mutants, including this one, survived the original property and were killed after strengthening (see Strengthening, rows `edit.ts:26`–`28`).
+- **Direct run with the patch applied:** both R2 tests from before the change (`17a6995`) pass. The strengthened tool test fails, with the shrunk counterexample `file "\n", A "\n", B "\n  "` (LF file) and the AI sending CRLF text: without the conversion, the round trip doesn't restore the file's bytes.
