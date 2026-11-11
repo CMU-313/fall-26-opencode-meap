@@ -19,13 +19,21 @@ import path from "path"
 import { Session } from "@/session/session"
 import { SessionRevert } from "../../src/session/revert"
 import { Snapshot } from "../../src/snapshot"
+import { Storage } from "@/storage/storage"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 
 const it = testEffect(
   LayerNode.compile(
-    LayerNode.group([Session.node, SessionRevert.node, Snapshot.node, SessionProjector.node, CrossSpawnSpawner.node]),
+    LayerNode.group([
+      Session.node,
+      SessionRevert.node,
+      Snapshot.node,
+      Storage.node,
+      SessionProjector.node,
+      CrossSpawnSpawner.node,
+    ]),
   ),
 )
 
@@ -167,11 +175,16 @@ const applyEdits = (dir: string, list: Edit[]) =>
 const tokens = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
 
 // Records one user message plus the agent's response, persisting the same
-// text / step-start / step-finish / patch parts the session processor writes
-// when an agent edits files. Returns the user message ID (what a whole-message
-// /undo targets) and the assistant message and step-start part IDs (what a
-// partial undo from inside the response targets).
-const agentTurn = Effect.fn("test.agentTurn")(function* (sessionID: SessionID, dir: string, list: Edit[]) {
+// text-or-tool / step-start / step-finish / patch parts the session processor
+// writes when an agent edits files. Returns the user message ID (what a
+// whole-message /undo targets) and the assistant message, lead part and
+// step-start part IDs (what a partial undo from inside the response targets).
+const agentTurn = Effect.fn("test.agentTurn")(function* (
+  sessionID: SessionID,
+  dir: string,
+  list: Edit[],
+  lead: "text" | "tool" = "text",
+) {
   const session = yield* Session.Service
   const snapshot = yield* Snapshot.Service
   const model = { providerID: ProviderV2.ID.make("openai"), modelID: ModelV2.ID.make("gpt-4") }
@@ -205,15 +218,29 @@ const agentTurn = Effect.fn("test.agentTurn")(function* (sessionID: SessionID, d
     time: { created: Date.now() },
     finish: "end_turn",
   })
-  // The agent says something before it starts editing, so a partial undo from
-  // the step-start keeps this text and undoes only what follows it.
-  yield* session.updatePart({
-    id: PartID.ascending(),
-    messageID: assistant.id,
-    sessionID,
-    type: "text",
-    text: "I'll make those edits.",
-  })
+  // The agent says something (or calls a read-only tool) before it starts
+  // editing, so a partial undo from the step-start keeps this part and undoes
+  // only what follows it.
+  const leadPart = yield* session.updatePart(
+    lead === "text"
+      ? { id: PartID.ascending(), messageID: assistant.id, sessionID, type: "text", text: "I'll make those edits." }
+      : {
+          id: PartID.ascending(),
+          messageID: assistant.id,
+          sessionID,
+          type: "tool",
+          callID: "call-read",
+          tool: "read",
+          state: {
+            status: "completed",
+            input: {},
+            output: "done",
+            title: "Read",
+            metadata: {},
+            time: { start: 0, end: 1 },
+          },
+        },
+  )
   const before = yield* snapshot.track()
   if (!before) throw new Error("expected a snapshot before the agent turn")
   const stepStart = yield* session.updatePart({
@@ -245,7 +272,7 @@ const agentTurn = Effect.fn("test.agentTurn")(function* (sessionID: SessionID, d
       hash: patch.hash,
       files: patch.files,
     })
-  return { user: user.id, assistant: assistant.id, stepStart: stepStart.id }
+  return { user: user.id, assistant: assistant.id, lead: leadPart.id, stepStart: stepStart.id }
 })
 
 // Runs fast-check inside an Effect test, executing each generated case as an
@@ -391,6 +418,9 @@ describe("undo/redo properties", () => {
               ]
               for (const target of targets) {
                 yield* revert.revert(target)
+                // A round trip alone passes when undo silently does nothing, so check undo reached the project
+                // before the message (Stryker: a partial undo whose part never matched survived).
+                expect(yield* readTree(dir)).toEqual(modelOf(input.base))
                 yield* revert.unrevert({ sessionID })
                 expect(yield* readTree(dir)).toEqual(beforeUndo)
               }
@@ -473,13 +503,17 @@ describe("undo/redo properties", () => {
     provideTmpdirInstance(
       (dir) =>
         property(
-          fc.record({ base: project, agent: edits, bulk }),
+          // earlier: a turn before the undone one. The summary must count only the undone message's files, not the
+          // whole session's (Stryker: computing the diff from the first message survived).
+          fc.record({ base: project, earlier: fc.array(edit, { maxLength: 4 }), agent: edits, bulk }),
           (input) =>
             Effect.gen(function* () {
               const sessions = yield* Session.Service
               const revert = yield* SessionRevert.Service
+              const storage = yield* Storage.Service
               yield* resetTree(dir, input.base)
               const sessionID = (yield* sessions.create({})).id
+              yield* agentTurn(sessionID, dir, input.earlier)
               const messageID = (yield* agentTurn(sessionID, dir, [...input.agent, ...bulkFiles(input.bulk)])).user
               const beforeUndo = yield* readTree(dir)
               const info = yield* revert.revert({ sessionID, messageID })
@@ -491,9 +525,76 @@ describe("undo/redo properties", () => {
               // The session summary's file count is what the user sees next to the undo, so it must agree with the
               // list too, including files with no line changes (empty or binary) (mutant H5).
               expect(info.summary?.files).toBe(listed.length)
+              // The session's diff view reads the same diffs back from storage.
+              const stored = yield* storage.read<unknown[]>(["session_diff", sessionID])
+              expect(stored.length).toBe(listed.length)
             }),
           // An empty new file has no ---/+++ lines in git's diff, so the TUI's parser dropped it from the list.
-          [{ base: {}, agent: [{ kind: "write", file: "a.ts", data: empty }], bulk: 1 }],
+          [{ base: {}, earlier: [], agent: [{ kind: "write", file: "a.ts", data: empty }], bulk: 1 }],
+        ),
+      { git: true },
+    ),
+    TIMEOUT,
+  )
+
+  // R6 (added in P5): /undo removes from the conversation exactly what it
+  // undid. Earlier messages stay, and an undo from inside a reply keeps the
+  // part of the reply before that point.
+  // Kind: model / oracle — the expected conversation after undo is computed
+  // from the message and part IDs before undo; every input is checked in all
+  // three ways an undo can be targeted.
+  it.live(
+    "R6: undo removes exactly the undone messages and parts from the conversation",
+    provideTmpdirInstance(
+      (dir) =>
+        property(
+          fc.record({
+            base: project,
+            earlier: fc.array(edit, { maxLength: 3 }),
+            agent: edits,
+            lead: fc.constantFrom("text" as const, "tool" as const),
+          }),
+          (input) =>
+            Effect.gen(function* () {
+              const sessions = yield* Session.Service
+              const revert = yield* SessionRevert.Service
+              const conversation = (sessionID: SessionID) =>
+                sessions
+                  .messages({ sessionID })
+                  .pipe(Effect.map((all) => all.map((msg) => [msg.info.id, msg.parts.map((part) => part.id)] as const)))
+
+              const modes = ["whole", "first-part", "step-start"] as const
+              for (const mode of modes) {
+                yield* resetTree(dir, input.base)
+                const sessionID = (yield* sessions.create({})).id
+                yield* agentTurn(sessionID, dir, input.earlier)
+                const turn = yield* agentTurn(sessionID, dir, input.agent, input.lead)
+                const before = yield* conversation(sessionID)
+                const userIndex = before.findIndex(([id]) => id === turn.user)
+                // Undoing the whole message, or from the first part of the reply (nothing before it is kept), removes
+                // the user message and everything after it. Undoing from the step-start keeps the user message and
+                // the reply's lead part.
+                const expected =
+                  mode === "step-start"
+                    ? before.map(([id, parts]) =>
+                        id === turn.assistant
+                          ? ([id, parts.slice(0, parts.indexOf(turn.stepStart))] as const)
+                          : [id, parts],
+                      )
+                    : before.slice(0, userIndex)
+                const target =
+                  mode === "whole"
+                    ? { sessionID, messageID: turn.user }
+                    : {
+                        sessionID,
+                        messageID: turn.assistant,
+                        partID: mode === "first-part" ? turn.lead : turn.stepStart,
+                      }
+                const info = yield* revert.revert(target)
+                yield* revert.cleanup(info)
+                expect({ mode, conversation: yield* conversation(sessionID) }).toEqual({ mode, conversation: expected })
+              }
+            }),
         ),
       { git: true },
     ),
