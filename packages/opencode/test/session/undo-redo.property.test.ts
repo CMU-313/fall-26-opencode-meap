@@ -48,7 +48,9 @@ fc.configureGlobal({ seed: 42 })
 // recreate, and edits to files the project already has. The pool deliberately
 // includes the path shapes interviewees and the snapshot code care about:
 // nested directories that undo must recreate, a dotfile, a space, and
-// non-ASCII characters (git quotes these unless core.quotepath=false).
+// non-ASCII characters (git quotes these unless core.quotepath=false). A
+// backslash is quoted by git even with core.quotepath=false, and on macOS/Linux
+// it is a filename character, not a path separator (found from a Stryker survivor).
 const PATHS = [
   "a.ts",
   "b.ts",
@@ -58,6 +60,7 @@ const PATHS = [
   "docs/with space.md",
   "ünïcødé.txt",
   ".env.local",
+  "back\\slash.txt",
 ] as const
 const filePath = fc.constantFrom(...PATHS)
 
@@ -136,7 +139,7 @@ const readTree = (dir: string) =>
     const files = await Array.fromAsync(new Bun.Glob("**/*").scan({ cwd: dir, dot: true, onlyFiles: true }))
     const entries = await Promise.all(
       files
-        .map((file) => file.replaceAll("\\", "/"))
+        .map((file) => file.split(path.sep).join("/"))
         .filter((file) => !file.startsWith(".git/"))
         .map(async (file) => [file, latin1(await Bun.file(path.join(dir, file)).bytes())] as const),
     )
@@ -314,14 +317,16 @@ describe("undo/redo properties", () => {
   // identical to its contents before the undone message was sent (files the
   // agent created are gone again, files it deleted are back).
   // Kind: model / oracle — the oracle is an in-memory map of the project that
-  // the edits are also applied to; the real worktree must match it after the
+  // the edits are also applied to; the real worktree must match it after every
   // agent turn, and must match the original map after undo.
   it.live(
     "R2: after undo the project matches the model of the project before the message",
     provideTmpdirInstance(
       (dir) =>
         property(
-          fc.record({ base: project, agent: edits }),
+          // later: more agent turns after the undone message. Undoing a message undoes everything after it, so a
+          // file edited in several turns must go back to its bytes before the *first* one, not an in-between version.
+          fc.record({ base: project, agent: edits, later: fc.array(edits, { maxLength: 2 }) }),
           (input) =>
             Effect.gen(function* () {
               const sessions = yield* Session.Service
@@ -330,7 +335,12 @@ describe("undo/redo properties", () => {
               const base = modelOf(input.base)
               const sessionID = (yield* sessions.create({})).id
               const messageID = (yield* agentTurn(sessionID, dir, input.agent)).user
+              const turns = [input.agent, ...input.later]
               expect(yield* readTree(dir)).toEqual(applyModel(base, input.agent))
+              for (const [i, list] of input.later.entries()) {
+                yield* agentTurn(sessionID, dir, list)
+                expect(yield* readTree(dir)).toEqual(applyModel(base, turns.slice(0, i + 2).flat()))
+              }
               yield* revert.revert({ sessionID, messageID })
               expect(yield* readTree(dir)).toEqual(base)
             }),
@@ -342,7 +352,11 @@ describe("undo/redo properties", () => {
                 { kind: "delete", file: "ünïcødé.txt" },
                 { kind: "write", file: "a.ts", data: empty },
               ],
+              later: [],
             },
+            // git quotes a backslash path even with core.quotepath=false, so the patch recorded a path that doesn't
+            // exist and undo left the created file behind.
+            { base: {}, agent: [{ kind: "write", file: "back\\slash.txt", data: empty }], later: [] },
           ],
         ),
       { git: true },
