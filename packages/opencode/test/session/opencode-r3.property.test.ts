@@ -58,13 +58,36 @@ const project = fc.dictionary(filePath, bytes, { maxKeys: PATHS.length })
 const edit = fc.oneof(
   { weight: 3, arbitrary: fc.record({ kind: fc.constant("write" as const), file: filePath, data: bytes }) },
   { weight: 1, arbitrary: fc.record({ kind: fc.constant("delete" as const), file: filePath }) },
+  // Strengthened (not written by opencode): agents rename files all the time, and a rename is a delete plus a
+  // create with identical bytes, which writes and deletes alone almost never line up. Mutant H4 needs exactly that.
+  { weight: 1, arbitrary: fc.record({ kind: fc.constant("move" as const), file: filePath, to: filePath }) },
 )
 const edits = fc.array(edit, { minLength: 1, maxLength: 8 })
 
 type Tree = Record<string, string>
-type Edit = { kind: "write"; file: string; data: Uint8Array } | { kind: "delete"; file: string }
+type Edit =
+  | { kind: "write"; file: string; data: Uint8Array }
+  | { kind: "delete"; file: string }
+  | { kind: "move"; file: string; to: string }
 
 const latin1 = (data: Uint8Array) => Buffer.from(data).toString("latin1")
+
+const modelOf = (files: Record<string, Uint8Array>) =>
+  Object.fromEntries(Object.entries(files).map(([file, data]) => [file, latin1(data)])) as Tree
+
+const applyModel = (tree: Tree, list: Edit[]) =>
+  list.reduce<Tree>((acc, op) => {
+    if (op.kind === "write") return { ...acc, [op.file]: latin1(op.data) }
+    if (op.kind === "move") {
+      if (!(op.file in acc) || op.file === op.to) return acc
+      const rest = Object.fromEntries(Object.entries(acc).filter(([file]) => file !== op.file))
+      return { ...rest, [op.to]: acc[op.file]! }
+    }
+    return Object.fromEntries(Object.entries(acc).filter(([file]) => file !== op.file))
+  }, tree)
+
+const changed = (a: Tree, b: Tree) =>
+  [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((file) => a[file] !== b[file])
 
 // ---------------------------------------------------------------------------
 // Worktree helpers
@@ -96,6 +119,13 @@ const applyEdits = (dir: string, list: Edit[]) =>
     for (const op of list) {
       if (op.kind === "write") await Bun.write(path.join(dir, op.file), op.data)
       if (op.kind === "delete") await fs.rm(path.join(dir, op.file), { force: true })
+      if (op.kind === "move" && op.file !== op.to) {
+        const source = Bun.file(path.join(dir, op.file))
+        if (!(await source.exists())) continue
+        const data = await source.bytes()
+        await fs.rm(path.join(dir, op.file))
+        await Bun.write(path.join(dir, op.to), data)
+      }
     }
   })
 
@@ -232,6 +262,20 @@ describe("R3: /undo then /redo round-trip", () => {
 
               const sessionAfterUndo = yield* revert.revert(undoTarget)
               expect(sessionAfterUndo.revert).toBeDefined()
+
+              // Strengthened (not written by opencode): the round trip alone can't see an undo bug that redo
+              // repairs, e.g. mutant H4, where undo deletes b.ts but never brings a.ts back and redo then restores
+              // the pre-undo snapshot. Check the intermediate state too: files the agent changed are back to their
+              // bytes before the message, and every other file is exactly as it was just before undo.
+              const afterEarlier = applyModel(modelOf(input.base), input.earlier)
+              const agentFiles = changed(afterEarlier, applyModel(afterEarlier, input.agent))
+              const expected = Object.fromEntries(
+                [...new Set([...Object.keys(beforeUndo), ...Object.keys(afterEarlier)])].flatMap((file) => {
+                  const source = agentFiles.includes(file) ? afterEarlier : beforeUndo
+                  return file in source ? [[file, source[file]]] : []
+                }),
+              )
+              expect(yield* readTree(dir)).toEqual(expected)
 
               const sessionAfterRedo = yield* revert.unrevert({ sessionID })
               expect(sessionAfterRedo.revert).toBeUndefined()
