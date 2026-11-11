@@ -1,0 +1,7 @@
+{
+  "testRunner": "command",
+  "commandRunner": { "command": "bun test test/permission/permission.property.test.ts" },
+  "mutate": ["src/permission/index.ts:28-38", "src/permission/index.ts:200-202"],
+  "coverageAnalysis": "off",
+  "reporters": ["html", "clear-text", "progress"]
+}

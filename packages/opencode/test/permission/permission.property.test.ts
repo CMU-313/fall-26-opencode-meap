@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test"
 import fc from "fast-check"
 import { evaluate, merge } from "../../src/permission"
+fc.configureGlobal({ seed: 42 })
 
 // Commands tested with, which mirror what came up in interviews: a safe
 // read (ls), a git command the TA wanted gated (S-6), and two rm variants
@@ -97,6 +98,21 @@ test("R5: an 'always allow' grant covers exactly its own patterns, nothing more"
         if (alwaysPatterns.includes(command)) continue
         expect(evaluate("bash", command, after)).toEqual(evaluate("bash", command, base))
       }
+    }),
+  )
+})
+
+// R3: When nothing matches, evaluate() falls back to exactly {action: "ask", permission, pattern: "*"},
+// not just some default-ish action string.
+// Kind: invariant
+test("R3: with no matching rule, evaluate() returns the exact default rule object", () => {
+  fc.assert(
+    fc.property(fc.string(), fc.string(), (permission, pattern) => {
+      expect(evaluate(permission, pattern)).toEqual({
+        action: "ask",
+        permission,
+        pattern: "*",
+      })
     }),
   )
 })
