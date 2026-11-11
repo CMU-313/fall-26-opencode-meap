@@ -351,7 +351,12 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
             Effect.gen(function* () {
               yield* add()
               const result = yield* git(
-                [...quote, ...args(["diff", "--cached", "--no-ext-diff", "--name-only", hash, "--", "."])],
+                // --no-renames: with rename detection a moved file lists only its new path, so reverting the
+                // patch would delete the new file without restoring the original.
+                [
+                  ...quote,
+                  ...args(["diff", "--cached", "--no-ext-diff", "--no-renames", "--name-only", hash, "--", "."]),
+                ],
                 {
                   cwd: state.directory,
                 },
@@ -463,8 +468,13 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                   continue
                 }
 
+                // -z keeps git from quoting non-ASCII or special paths, which would otherwise fail the
+                // `have` lookup below and delete files that do exist in the snapshot.
                 const tree = yield* git(
-                  [...core, ...args(["ls-tree", "--name-only", first.hash, "--", ...run.map((item) => item.rel)])],
+                  [
+                    ...core,
+                    ...args(["ls-tree", "-z", "--name-only", first.hash, "--", ...run.map((item) => item.rel)]),
+                  ],
                   {
                     cwd: state.worktree,
                   },
@@ -482,13 +492,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                   continue
                 }
 
-                const have = new Set(
-                  tree.text
-                    .trim()
-                    .split("\n")
-                    .map((item) => item.trim())
-                    .filter(Boolean),
-                )
+                const have = new Set(tree.text.split("\0").filter(Boolean))
                 const list = run.filter((item) => have.has(item.rel))
                 if (list.length) {
                   yield* Effect.logInfo("reverting", { hash: first.hash, files: list.length })
