@@ -34,6 +34,11 @@ const it = testEffect(
 const NUM_RUNS = 15
 const TIMEOUT = 180_000
 
+// Fixed seed so mutation-testing runs (hand-written mutants and Stryker) are
+// reproducible: a mutant's result can't flip between runs because fast-check
+// drew different inputs. Recorded in traceability/evali.md.
+fc.configureGlobal({ seed: 42 })
+
 // ---------------------------------------------------------------------------
 // Generators
 // ---------------------------------------------------------------------------
@@ -159,8 +164,10 @@ const applyEdits = (dir: string, list: Edit[]) =>
 const tokens = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
 
 // Records one user message plus the agent's response, persisting the same
-// step-start / step-finish / patch parts the session processor writes when an
-// agent edits files. Returns the user message ID, which is what /undo targets.
+// text / step-start / step-finish / patch parts the session processor writes
+// when an agent edits files. Returns the user message ID (what a whole-message
+// /undo targets) and the assistant message and step-start part IDs (what a
+// partial undo from inside the response targets).
 const agentTurn = Effect.fn("test.agentTurn")(function* (sessionID: SessionID, dir: string, list: Edit[]) {
   const session = yield* Session.Service
   const snapshot = yield* Snapshot.Service
@@ -195,9 +202,18 @@ const agentTurn = Effect.fn("test.agentTurn")(function* (sessionID: SessionID, d
     time: { created: Date.now() },
     finish: "end_turn",
   })
+  // The agent says something before it starts editing, so a partial undo from
+  // the step-start keeps this text and undoes only what follows it.
+  yield* session.updatePart({
+    id: PartID.ascending(),
+    messageID: assistant.id,
+    sessionID,
+    type: "text",
+    text: "I'll make those edits.",
+  })
   const before = yield* snapshot.track()
   if (!before) throw new Error("expected a snapshot before the agent turn")
-  yield* session.updatePart({
+  const stepStart = yield* session.updatePart({
     id: PartID.ascending(),
     messageID: assistant.id,
     sessionID,
@@ -226,7 +242,7 @@ const agentTurn = Effect.fn("test.agentTurn")(function* (sessionID: SessionID, d
       hash: patch.hash,
       files: patch.files,
     })
-  return user.id
+  return { user: user.id, assistant: assistant.id, stepStart: stepStart.id }
 })
 
 // Runs fast-check inside an Effect test, executing each generated case as an
@@ -249,34 +265,45 @@ const empty = new Uint8Array()
 describe("undo/redo properties", () => {
   // R1: /undo changes only files the agent edited in the undone message. Every
   // other file in the project — including files the user edited by hand after
-  // the agent finished — is left exactly as it was.
+  // the agent finished, and files an earlier message in the same session
+  // changed — is left exactly as it was.
   // Kind: invariant
   it.live(
     "R1: undo leaves every file outside the agent's changes untouched",
     provideTmpdirInstance(
       (dir) =>
-        property(fc.record({ base: project, agent: edits, manual: fc.array(edit, { maxLength: 4 }) }), (input) =>
-          Effect.gen(function* () {
-            const sessions = yield* Session.Service
-            const revert = yield* SessionRevert.Service
-            yield* resetTree(dir, input.base)
-            const base = modelOf(input.base)
-            const sessionID = (yield* sessions.create({})).id
-            const messageID = yield* agentTurn(sessionID, dir, input.agent)
-            const agentFiles = changed(base, applyModel(base, input.agent))
-            // The user then hand-edits files the agent did not touch.
-            yield* applyEdits(
-              dir,
-              input.manual.filter((op) => !agentFiles.includes(op.file)),
-            )
-            const beforeUndo = yield* readTree(dir)
-            yield* revert.revert({ sessionID, messageID })
-            const afterUndo = yield* readTree(dir)
-            const others = [...new Set([...Object.keys(beforeUndo), ...Object.keys(afterUndo)])].filter(
-              (file) => !agentFiles.includes(file),
-            )
-            expect(pick(afterUndo, others)).toEqual(pick(beforeUndo, others))
+        property(
+          fc.record({
+            base: project,
+            // An earlier agent turn in the same session that is not undone. Without it every session has one
+            // message, so undo could revert every patch in the session and still pass (mutant H1).
+            earlier: fc.array(edit, { maxLength: 4 }),
+            agent: edits,
+            manual: fc.array(edit, { maxLength: 4 }),
           }),
+          (input) =>
+            Effect.gen(function* () {
+              const sessions = yield* Session.Service
+              const revert = yield* SessionRevert.Service
+              yield* resetTree(dir, input.base)
+              const base = applyModel(modelOf(input.base), input.earlier)
+              const sessionID = (yield* sessions.create({})).id
+              yield* agentTurn(sessionID, dir, input.earlier)
+              const messageID = (yield* agentTurn(sessionID, dir, input.agent)).user
+              const agentFiles = changed(base, applyModel(base, input.agent))
+              // The user then hand-edits files the agent did not touch.
+              yield* applyEdits(
+                dir,
+                input.manual.filter((op) => !agentFiles.includes(op.file)),
+              )
+              const beforeUndo = yield* readTree(dir)
+              yield* revert.revert({ sessionID, messageID })
+              const afterUndo = yield* readTree(dir)
+              const others = [...new Set([...Object.keys(beforeUndo), ...Object.keys(afterUndo)])].filter(
+                (file) => !agentFiles.includes(file),
+              )
+              expect(pick(afterUndo, others)).toEqual(pick(beforeUndo, others))
+            }),
         ),
       { git: true },
     ),
@@ -302,7 +329,7 @@ describe("undo/redo properties", () => {
               yield* resetTree(dir, input.base)
               const base = modelOf(input.base)
               const sessionID = (yield* sessions.create({})).id
-              const messageID = yield* agentTurn(sessionID, dir, input.agent)
+              const messageID = (yield* agentTurn(sessionID, dir, input.agent)).user
               expect(yield* readTree(dir)).toEqual(applyModel(base, input.agent))
               yield* revert.revert({ sessionID, messageID })
               expect(yield* readTree(dir)).toEqual(base)
@@ -331,21 +358,27 @@ describe("undo/redo properties", () => {
     provideTmpdirInstance(
       (dir) =>
         property(
-          fc.record({ base: project, agent: edits }),
+          // atPart: undo from the assistant's step-start part (keeping the text before it) instead of the whole
+          // message. Redo must then find the undone files from the assistant message itself (mutant H3).
+          fc.record({ base: project, agent: edits, atPart: fc.boolean() }),
           (input) =>
             Effect.gen(function* () {
               const sessions = yield* Session.Service
               const revert = yield* SessionRevert.Service
               yield* resetTree(dir, input.base)
               const sessionID = (yield* sessions.create({})).id
-              const messageID = yield* agentTurn(sessionID, dir, input.agent)
+              const turn = yield* agentTurn(sessionID, dir, input.agent)
               const beforeUndo = yield* readTree(dir)
-              yield* revert.revert({ sessionID, messageID })
+              yield* revert.revert(
+                input.atPart
+                  ? { sessionID, messageID: turn.assistant, partID: turn.stepStart }
+                  : { sessionID, messageID: turn.user },
+              )
               yield* revert.unrevert({ sessionID })
               expect(yield* readTree(dir)).toEqual(beforeUndo)
             }),
           // Redo left behind a file the agent had deleted (restore never removed files missing from the snapshot).
-          [{ base: { "a.ts": empty }, agent: [{ kind: "delete", file: "a.ts" }] }],
+          [{ base: { "a.ts": empty }, agent: [{ kind: "delete", file: "a.ts" }], atPart: false }],
         ),
       { git: true },
     ),
@@ -382,7 +415,7 @@ describe("undo/redo properties", () => {
                 Effect.gen(function* () {
                   yield* resetTree(dir, input.base)
                   const sessionID = (yield* sessions.create({})).id
-                  const messageID = yield* agentTurn(sessionID, dir, list)
+                  const messageID = (yield* agentTurn(sessionID, dir, list)).user
                   yield* revert.revert({ sessionID, messageID })
                   return yield* readTree(dir)
                 })
@@ -429,7 +462,7 @@ describe("undo/redo properties", () => {
               const revert = yield* SessionRevert.Service
               yield* resetTree(dir, input.base)
               const sessionID = (yield* sessions.create({})).id
-              const messageID = yield* agentTurn(sessionID, dir, [...input.agent, ...bulkFiles(input.bulk)])
+              const messageID = (yield* agentTurn(sessionID, dir, [...input.agent, ...bulkFiles(input.bulk)])).user
               const beforeUndo = yield* readTree(dir)
               const info = yield* revert.revert({ sessionID, messageID })
               const afterUndo = yield* readTree(dir)
@@ -437,6 +470,9 @@ describe("undo/redo properties", () => {
                 .map((item) => item.filename)
                 .toSorted()
               expect(listed).toEqual(changed(beforeUndo, afterUndo))
+              // The session summary's file count is what the user sees next to the undo, so it must agree with the
+              // list too, including files with no line changes (empty or binary) (mutant H5).
+              expect(info.summary?.files).toBe(listed.length)
             }),
           // An empty new file has no ---/+++ lines in git's diff, so the TUI's parser dropped it from the list.
           [{ base: {}, agent: [{ kind: "write", file: "a.ts", data: empty }], bulk: 1 }],

@@ -1,0 +1,13 @@
+diff --git a/packages/opencode/src/snapshot/index.ts b/packages/opencode/src/snapshot/index.ts
+index a113c65..74facf4 100644
+--- a/packages/opencode/src/snapshot/index.ts
++++ b/packages/opencode/src/snapshot/index.ts
+@@ -354,7 +354,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
+                 // --no-renames: with rename detection a moved file lists only its new path, so reverting the
+                 // patch would delete the new file without restoring the original.
+                 [
+-                  ...quote,
++                  ...cfg,
+                   ...args(["diff", "--cached", "--no-ext-diff", "--no-renames", "--name-only", hash, "--", "."]),
+                 ],
+                 {
