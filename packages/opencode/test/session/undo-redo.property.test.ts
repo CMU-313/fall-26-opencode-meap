@@ -579,7 +579,7 @@ describe("undo/redo properties", () => {
                     ? before.map(([id, parts]) =>
                         id === turn.assistant
                           ? ([id, parts.slice(0, parts.indexOf(turn.stepStart))] as const)
-                          : [id, parts],
+                          : ([id, parts] as const),
                       )
                     : before.slice(0, userIndex)
                 const target =
