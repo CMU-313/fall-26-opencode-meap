@@ -6,10 +6,15 @@
   },
   "mutate": [
     "src/session/revert.ts:38-112",
-    "src/snapshot/index.ts:349-385",
-    "src/snapshot/index.ts:413-528"
+    "src/snapshot/index.ts:349-384",
+    "src/snapshot/index.ts:412-527"
   ],
   "coverageAnalysis": "off",
   "concurrency": 4,
-  "reporters": ["html", "clear-text", "progress"]
+  "reporters": [
+    "html",
+    "clear-text",
+    "progress"
+  ],
+  "timeoutMS": 60000
 }

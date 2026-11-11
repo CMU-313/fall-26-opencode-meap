@@ -372,9 +372,7 @@ describe("undo/redo properties", () => {
     provideTmpdirInstance(
       (dir) =>
         property(
-          // atPart: undo from the assistant's step-start part (keeping the text before it) instead of the whole
-          // message. Redo must then find the undone files from the assistant message itself (mutant H3).
-          fc.record({ base: project, agent: edits, atPart: fc.boolean() }),
+          fc.record({ base: project, agent: edits }),
           (input) =>
             Effect.gen(function* () {
               const sessions = yield* Session.Service
@@ -383,16 +381,22 @@ describe("undo/redo properties", () => {
               const sessionID = (yield* sessions.create({})).id
               const turn = yield* agentTurn(sessionID, dir, input.agent)
               const beforeUndo = yield* readTree(dir)
-              yield* revert.revert(
-                input.atPart
-                  ? { sessionID, messageID: turn.assistant, partID: turn.stepStart }
-                  : { sessionID, messageID: turn.user },
-              )
-              yield* revert.unrevert({ sessionID })
-              expect(yield* readTree(dir)).toEqual(beforeUndo)
+              // Every input is round-tripped both ways: undoing the whole message, and undoing from the assistant's
+              // step-start part (keeping the text before it). For the second, redo has to find the undone files
+              // from the assistant message itself (mutant H3). Checking both on every input, rather than picking
+              // one at random, keeps the kill from depending on which inputs the seed draws.
+              const targets = [
+                { sessionID, messageID: turn.user },
+                { sessionID, messageID: turn.assistant, partID: turn.stepStart },
+              ]
+              for (const target of targets) {
+                yield* revert.revert(target)
+                yield* revert.unrevert({ sessionID })
+                expect(yield* readTree(dir)).toEqual(beforeUndo)
+              }
             }),
           // Redo left behind a file the agent had deleted (restore never removed files missing from the snapshot).
-          [{ base: { "a.ts": empty }, agent: [{ kind: "delete", file: "a.ts" }], atPart: false }],
+          [{ base: { "a.ts": empty }, agent: [{ kind: "delete", file: "a.ts" }] }],
         ),
       { git: true },
     ),

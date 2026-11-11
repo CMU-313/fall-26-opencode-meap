@@ -1,13 +1,13 @@
 diff --git a/packages/opencode/src/snapshot/index.ts b/packages/opencode/src/snapshot/index.ts
-index a113c65..a5e0bf2 100644
+index 9055dc6..fe3e28c 100644
 --- a/packages/opencode/src/snapshot/index.ts
 +++ b/packages/opencode/src/snapshot/index.ts
-@@ -355,7 +355,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
-                 // patch would delete the new file without restoring the original.
-                 [
+@@ -357,7 +357,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                    ...quote,
--                  ...args(["diff", "--cached", "--no-ext-diff", "--no-renames", "--name-only", hash, "--", "."]),
-+                  ...args(["diff", "--cached", "--no-ext-diff", "--name-only", hash, "--", "."]),
+                   // -z: core.quotepath=false only stops git quoting non-ASCII; a path with a backslash, quote or
+                   // control character is still quoted, so undo would revert a path that doesn't exist.
+-                  ...args(["diff", "--cached", "--no-ext-diff", "--no-renames", "--name-only", "-z", hash, "--", "."]),
++                  ...args(["diff", "--cached", "--no-ext-diff", "--name-only", "-z", hash, "--", "."]),
                  ],
                  {
                    cwd: state.directory,
