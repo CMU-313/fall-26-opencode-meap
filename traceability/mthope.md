@@ -58,3 +58,39 @@ I wouldn't have split the default object into three separate mutants the way Str
 
 **What does each approach find that the other doesn't?**
 Stryker is exhaustive about every literal and operator in the lines I pointed it at, so it caught all three ways the same default object could quietly break, something I only partially covered by hand. But Stryker can only swap a literal for a generic placeholder value (empty string, `{}`); it has no idea that `pattern` (the function's own parameter) was sitting right there as a plausible typo for `"*"` — that's exactly what my hand-written H5 mutant did, and it's a kind of mistake that needs understanding what the code is doing, not just pattern-matching on syntax. Hand-written mutants are better at targeting a specific requirement with a bug shaped like something I could imagine a teammate actually writing (an off-by-one on an argument list, a condition that's too narrow); Stryker is better at finding every small thing in the exact lines I gave it that nothing currently checks, even ones I wouldn't have thought to try.
+
+## Agent failure case
+
+**Transcript excerpt** (from the Project 4 session where I asked Claude to write my first property tests, Step 2 of that assignment):
+
+My prompt: "ok do step 2: [Step 2 instructions — write fast-check properties for at least 4 requirements]"
+
+Claude's response (relevant excerpt):
+> Here's the property test file. Since I don't know your exact import convention... I've written it with a placeholder import...
+>
+> ```ts
+> // R1: A command whose last matching rule has action deny is rejected
+> // immediately, before any approval is requested.
+> // Kind: invariant
+> test("R1: a deny rule placed last always wins, no matter what precedes it", () => {
+>   fc.assert(
+>     fc.property(rulesetArb, commandArb, (prefix, command) => {
+>       const denyRule = { permission: "bash", pattern: command, action: "deny" as const }
+>       const result = Permission.evaluate("bash", command, [...prefix, denyRule])
+>       expect(result.action).toBe("deny")
+>     }),
+>   )
+> })
+> ```
+>
+> **4. Once it's passing**, update `traceability/mthope.md`... Fill in the "Properties written or suggested by opencode" line: `R1, R2, R5, R6 — drafted by Claude from the real evaluate()/merge() code, reviewed and run by me.`
+
+I reviewed this, ran it, and kept it (it's still the R1 property in my test file today, just with the import path fixed).
+
+**The mutant it let survive:** H4 — `ask()`'s deny check changed from `if (rule.action === "deny")` to `if (rule.action === "deny" && pattern === "*")`, so a deny rule only actually blocks a command when the pattern being checked is the literal wildcard `"*"`. Everything else with a matching deny rule would silently fall through to `needsAsk = true` instead of rejecting.
+
+**Why the property was too weak:** R1's own acceptance criteria says the requirement covers two things: `evaluate()` returning `"deny"`, *and* `ask()` actually rejecting with a `DeniedError` on that same input. The property Claude wrote only checks the first half — it calls `Permission.evaluate()` directly and never calls `ask()` at all. So a bug that corrupts `ask()`'s own deny-enforcement, while leaving `evaluate()` completely untouched, is invisible to this property no matter how many inputs fast-check throws at it. This is a generator/oracle gap: the oracle (the assertion) just never reaches the function the bug lives in.
+
+**Strengthened property:** new file `test/permission/permission.ask.property.test.ts` (kept separate from my original property file so I don't touch what's already graded), reusing the existing Effect test harness from `test/permission/next.test.ts`. It calls the real `ask()` across 20 randomly generated command strings, each with a deny rule matching exactly that command, and asserts `ask()` rejects with a `PermissionV1.DeniedError` every time — not just for the literal `"*"` pattern.
+
+**Evidence it kills H4:** Ran bun test test/permission/permission.ask.property.test.ts on real code first — passed clean, 1 test, 20 expect() calls (20 randomly generated commands). Applied mutants/mthope/H4.patch and ran it again — failed: ask() never resolved for the generated command (something other than the literal "*"), hit the 1-second timeout, and the test got a plain Error back instead of PermissionV1.DeniedError, so the assertion failed. H4 killed.
