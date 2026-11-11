@@ -93,7 +93,20 @@ const layer = Layer.effect(
       yield* state.assertNotBusy(input.sessionID)
       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
       if (!session.revert) return session
-      if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot)
+      const snapshot = session.revert.snapshot
+      if (snapshot) {
+        yield* snap.restore(snapshot)
+        // restore() deliberately keeps files that are missing from the snapshot, so a file the agent deleted
+        // and the undo brought back would survive the redo. Reset the undone patches' files to the snapshot,
+        // which deletes the ones it doesn't contain, without touching unrelated new files.
+        const messageID = session.revert.messageID
+        const all = yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
+        const index = all.findIndex((msg) => msg.info.id === messageID)
+        const files = (index < 0 ? [] : all.slice(index))
+          .flatMap((msg) => msg.parts)
+          .flatMap((part) => (part.type === "patch" ? part.files : []))
+        if (files.length) yield* snap.revert([{ hash: snapshot, files }])
+      }
       yield* sessions.clearRevert(input.sessionID)
       return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
     })

@@ -23,8 +23,10 @@ function normalizeLineEndings(text: string): string {
   return text.replaceAll("\r\n", "\n")
 }
 
-function detectLineEnding(text: string): "\n" | "\r\n" {
-  return text.includes("\r\n") ? "\r\n" : "\n"
+function detectLineEnding(text: string): "\n" | "\r\n" | undefined {
+  if (text.includes("\r\n")) return "\r\n"
+  if (text.includes("\n")) return "\n"
+  return undefined
 }
 
 function convertToLineEnding(text: string, ending: "\n" | "\r\n"): string {
@@ -127,8 +129,14 @@ export const EditTool = Tool.define(
               contentOld = source.text
 
               const ending = detectLineEnding(contentOld)
-              const old = convertToLineEnding(normalizeLineEndings(params.oldString), ending)
-              const replacement = convertToLineEnding(normalizeLineEndings(params.newString), ending)
+              // A file with no line breaks has no ending to match, so keep the AI's own endings
+              // instead of assuming LF (which turned CRLF back into LF on a round trip).
+              const old = ending
+                ? convertToLineEnding(normalizeLineEndings(params.oldString), ending)
+                : params.oldString
+              const replacement = ending
+                ? convertToLineEnding(normalizeLineEndings(params.newString), ending)
+                : params.newString
 
               const next = Bom.split(replace(contentOld, old, replacement, params.replaceAll))
               const desiredBom = source.bom || next.bom
@@ -712,7 +720,9 @@ export function replace(content: string, oldString: string, newString: string, r
         )
       }
       if (replaceAll) {
-        return content.replaceAll(search, newString)
+        // A replacer function inserts newString literally; a plain string would treat
+        // `$$`, `$&`, `` $` `` and `$'` in it as replacement patterns.
+        return content.replaceAll(search, () => newString)
       }
       const lastIndex = content.lastIndexOf(search)
       if (index !== lastIndex) continue

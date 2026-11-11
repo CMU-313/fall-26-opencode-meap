@@ -1,0 +1,17 @@
+diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
+index e1a8280..35f84fe 100644
+--- a/packages/opencode/src/tool/edit.ts
++++ b/packages/opencode/src/tool/edit.ts
+@@ -23,11 +23,7 @@ function normalizeLineEndings(text: string): string {
+   return text.replaceAll("\r\n", "\n")
+ }
+ 
+-function detectLineEnding(text: string): "\n" | "\r\n" | undefined {
+-  if (text.includes("\r\n")) return "\r\n"
+-  if (text.includes("\n")) return "\n"
+-  return undefined
+-}
++function detectLineEnding(text: string): "\n" | "\r\n" | undefined {}
+ 
+ function convertToLineEnding(text: string, ending: "\n" | "\r\n"): string {
+   if (ending === "\n") return text

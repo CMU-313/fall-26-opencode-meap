@@ -1,0 +1,13 @@
+diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
+index e1a8280..ee64d2a 100644
+--- a/packages/opencode/src/tool/edit.ts
++++ b/packages/opencode/src/tool/edit.ts
+@@ -724,8 +724,6 @@ export function replace(content: string, oldString: string, newString: string, r
+         // `$$`, `$&`, `` $` `` and `$'` in it as replacement patterns.
+         return content.replaceAll(search, () => newString)
+       }
+-      const lastIndex = content.lastIndexOf(search)
+-      if (index !== lastIndex) continue
+       return content.substring(0, index) + newString + content.substring(index + search.length)
+     }
+   }

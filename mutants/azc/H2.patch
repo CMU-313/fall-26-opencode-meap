@@ -1,0 +1,14 @@
+diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
+index e1a8280..ed37d77 100644
+--- a/packages/opencode/src/tool/edit.ts
++++ b/packages/opencode/src/tool/edit.ts
+@@ -697,6 +697,9 @@ export function replace(content: string, oldString: string, newString: string, r
+     )
+   }
+ 
++  // Fast path: an exact replace-all doesn't need the fuzzy matchers.
++  if (replaceAll) return content.replaceAll(oldString, () => newString)
++
+   let notFound = true
+ 
+   for (const replacer of [
