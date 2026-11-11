@@ -1,0 +1,13 @@
+diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
+index e1a8280..c439c56 100644
+--- a/packages/opencode/src/tool/edit.ts
++++ b/packages/opencode/src/tool/edit.ts
+@@ -139,7 +139,7 @@ export const EditTool = Tool.define(
+                 : params.newString
+ 
+               const next = Bom.split(replace(contentOld, old, replacement, params.replaceAll))
+-              const desiredBom = source.bom || next.bom
++              const desiredBom = next.bom
+               contentNew = next.text
+ 
+               diff = trimDiff(
