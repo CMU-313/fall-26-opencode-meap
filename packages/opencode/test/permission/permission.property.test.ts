@@ -116,3 +116,43 @@ test("R3: with no matching rule, evaluate() returns the exact default rule objec
     }),
   )
 })
+
+// R2 (additional): a rule in a later ruleset ARGUMENT beats one in an earlier
+// ruleset argument, not just a later rule within one combined array. My
+// original R2 property always passes both rules inside a single array
+// ([ruleA, ruleB]), so it never exercises precedence across separate
+// ruleset arguments the way ask() actually calls evaluate(permission,
+// pattern, ruleset, approved). Credit: tiffany4's red-team mutant 1
+// (adding .toReversed() before flattening) showed this gap.
+// Kind: invariant
+test("R2: a later ruleset argument wins over an earlier one, not just a later rule in one array", () => {
+  fc.assert(
+    fc.property(commandArb, actionArb, actionArb, (command, actionA, actionB) => {
+      fc.pre(actionA !== actionB)
+      const first = [{ permission: "bash" as const, pattern: command, action: actionA }]
+      const second = [{ permission: "bash" as const, pattern: command, action: actionB }]
+      expect(evaluate("bash", command, first, second).action).toBe(actionB)
+    }),
+  )
+})
+
+// R6 (additional): a rule appended to the SAME array in place must be picked
+// up by the very next evaluate() call on that array, not a stale snapshot
+// from an earlier call. My original R6 property only ever evaluates once
+// before pushing and once after popping, so a cache keyed by array identity
+// that's never invalidated after push() goes unnoticed. Credit: tiffany4's
+// red-team mutant 3 (a WeakMap cache keyed by the ruleset array).
+// Kind: invariant
+test("R6: a rule appended to the same array in place is picked up immediately", () => {
+  fc.assert(
+    fc.property(commandArb, (command) => {
+      const live: { permission: string; pattern: string; action: "allow" | "ask" | "deny" }[] = [
+        { permission: "bash", pattern: "*", action: "ask" },
+      ]
+      evaluate("bash", command, live) // prime: whatever a cache would snapshot on first read
+
+      live.push({ permission: "bash", pattern: command, action: "deny" })
+      expect(evaluate("bash", command, live).action).toBe("deny")
+    }),
+  )
+})
