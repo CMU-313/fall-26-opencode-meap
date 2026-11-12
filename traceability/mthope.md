@@ -82,8 +82,8 @@ Claude's response (relevant excerpt):
 >   )
 > })
 > ```
->
-> **4. Once it's passing**, update `traceability/mthope.md`... Fill in the "Properties written or suggested by opencode" line: `R1, R2, R5, R6 — drafted by Claude from the real evaluate()/merge() code, reviewed and run by me.`
+
+I reviewed this, ran it, and kept it (it's still the R1 property in my test file today, just with the import path fixed).
 
 I reviewed this, ran it, and kept it (it's still the R1 property in my test file today, just with the import path fixed).
 
