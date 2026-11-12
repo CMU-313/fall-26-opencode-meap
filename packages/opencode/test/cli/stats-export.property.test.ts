@@ -6,6 +6,8 @@ import { Effect } from "effect"
 import fc from "fast-check"
 import { exportStats, renderCsv, renderMarkdown, shapeStats, type SessionStats } from "../../src/cli/cmd/stats"
 
+fc.configureGlobal({ seed: 42 })
+
 type Payload = ReturnType<typeof shapeStats>
 
 const nat = (max: number) => fc.nat({ max })
