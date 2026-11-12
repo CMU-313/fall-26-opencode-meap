@@ -1,0 +1,13 @@
+diff --git a/packages/opencode/src/session/revert.ts b/packages/opencode/src/session/revert.ts
+index 1a23e4a..0c0b830 100644
+--- a/packages/opencode/src/session/revert.ts
++++ b/packages/opencode/src/session/revert.ts
+@@ -82,7 +82,7 @@ const layer = Layer.effect(
+         summary: {
+           additions: diffs.reduce((sum, x) => sum + x.additions, 0),
+           deletions: diffs.reduce((sum, x) => sum + x.deletions, 0),
+-          files: diffs.length,
++          files: diffs.filter((x) => x.additions + x.deletions > 0).length,
+         },
+       })
+       return yield* sessions.get(input.sessionID).pipe(Effect.orDie)

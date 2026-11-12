@@ -355,7 +355,9 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                 // patch would delete the new file without restoring the original.
                 [
                   ...quote,
-                  ...args(["diff", "--cached", "--no-ext-diff", "--no-renames", "--name-only", hash, "--", "."]),
+                  // -z: core.quotepath=false only stops git quoting non-ASCII; a path with a backslash, quote or
+                  // control character is still quoted, so undo would revert a path that doesn't exist.
+                  ...args(["diff", "--cached", "--no-ext-diff", "--no-renames", "--name-only", "-z", hash, "--", "."]),
                 ],
                 {
                   cwd: state.directory,
@@ -365,11 +367,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                 yield* Effect.logWarning("failed to get diff", { hash, exitCode: result.code })
                 return { hash, files: [] }
               }
-              const files = result.text
-                .trim()
-                .split("\n")
-                .map((x) => x.trim())
-                .filter(Boolean)
+              const files = result.text.split("\0").filter(Boolean)
 
               // Hide ignored-file removals from the user-facing patch output.
               const ignored = yield* ignore(files)
@@ -378,7 +376,8 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                 hash,
                 files: files
                   .filter((item) => !ignored.has(item))
-                  .map((x) => path.join(state.worktree, x).replaceAll("\\", "/")),
+                  // Only convert real separators: on macOS/Linux a backslash is a valid filename character.
+                  .map((x) => path.join(state.worktree, x).split(path.sep).join("/")),
               }
             }),
           )
@@ -422,7 +421,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                   ops.push({
                     hash: item.hash,
                     file,
-                    rel: path.relative(state.worktree, file).replaceAll("\\", "/"),
+                    rel: path.relative(state.worktree, file).split(path.sep).join("/"),
                   })
                 }
               }
