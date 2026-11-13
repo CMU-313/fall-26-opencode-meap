@@ -1,11 +1,22 @@
 import { describe, expect, spyOn, test } from "bun:test"
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
 import fc from "fast-check"
-import { exportStats, renderCsv, renderMarkdown, shapeStats, type SessionStats } from "../../src/cli/cmd/stats"
+import { Global } from "@opencode-ai/core/global"
+import { CliError } from "../../src/cli/effect-cmd"
+import {
+  exportStats,
+  renderCsv,
+  renderMarkdown,
+  reportStats,
+  resolveExportDir,
+  shapeStats,
+  type SessionStats,
+} from "../../src/cli/cmd/stats"
 
+// Fixed so Stryker results are reproducible: every run checks the same inputs.
 fc.configureGlobal({ seed: 42 })
 
 type Payload = ReturnType<typeof shapeStats>
@@ -17,10 +28,16 @@ const nanOr = (arb: fc.Arbitrary<number>) => fc.oneof(arb, fc.constant(NaN))
 const tokens = nat(1e12)
 const cache = fc.record({ read: tokens, write: tokens })
 const usd = real(100_000)
-const timestamp = fc.integer({ min: 1.6e12, max: 1.9e12 })
+// Mostly real session times, plus the aggregator's "unset" values and the
+// edges of the range Date can represent (8.64e15 ms).
+const timestamp = fc.oneof(
+  fc.integer({ min: 1.6e12, max: 1.9e12 }),
+  fc.integer({ min: 1.6e12, max: 1.9e12 }),
+  fc.constantFrom(0, -1, NaN, 8.64e15, 8.64e15 + 1),
+)
 
 const statsArb: fc.Arbitrary<SessionStats> = fc.record({
-  totalSessions: nat(100_000),
+  totalSessions: fc.oneof(fc.constant(0), nat(100_000)),
   totalMessages: nat(10_000_000),
   totalCost: usd,
   totalTokens: fc.record({ input: tokens, output: tokens, reasoning: tokens, cache }),
@@ -72,10 +89,11 @@ const csvRows = (body: string) =>
     .split("\n")
     .slice(1)
     .map((line) => {
-      const [scope, id, metric, value] = [...line.matchAll(/(?:^|,)("(?:[^"]|"")*"|[^,]*)/g)].map(([, field]) =>
+      const raw = [...line.matchAll(/(?:^|,)("(?:[^"]|"")*"|[^,]*)/g)].map(([, field]) => field)
+      const [scope, id, metric, value] = raw.map((field) =>
         field.startsWith('"') ? field.slice(1, -1).replaceAll('""', '"') : field,
       )
-      return { scope, id, metric, value }
+      return { scope, id, metric, value, rawValue: raw[3] }
     })
 
 const fromCsv = (body: string) =>
@@ -102,7 +120,12 @@ function fromMarkdown(body: string) {
         .map((line) => line.slice(2, -2).split(/(?<!\\) \| /)),
     )
   const num = (cell: string) => Number(cell.replace(/[$,*]/g, ""))
-  const id = (cell: string) => (cell.startsWith("`` ") ? cell.slice(3, -3) : cell.slice(1, -1)).replaceAll("\\|", "|")
+  // Longer fences pad the value with a space on each side.
+  const id = (cell: string) => {
+    const fence = cell.match(/^`+/)![0].length
+    const inner = cell.slice(fence, -fence)
+    return (fence > 1 ? inner.slice(1, -1) : inner).replaceAll("\\|", "|")
+  }
   const zip = (metrics: string[], cells: string[]) => Object.fromEntries(metrics.map((m, i) => [m, num(cells[i])]))
   return {
     overview: zip(
@@ -116,6 +139,14 @@ function fromMarkdown(body: string) {
     models: models.map(([cell, ...cells]) => ({ id: id(cell), ...zip(MODEL_METRICS, cells) })),
     tools: tools.map(([cell, calls]) => ({ name: id(cell), calls: num(calls) })),
   } as Omit<Payload, "meta">
+}
+
+/** GFM code span rule: the fence closes the span, so no backtick run inside may match its length. */
+function isCodeSpan(cell: string) {
+  const fence = cell.match(/^`+/)?.[0]
+  if (!fence || !cell.endsWith(fence) || cell.length < fence.length * 2) return false
+  const inner = cell.slice(fence.length, -fence.length)
+  return !(inner.match(/`+/g) ?? []).some((run) => run.length === fence.length)
 }
 
 /** Inverse of shapeStats, so an export can be fed back through the exporter. */
@@ -154,13 +185,15 @@ describe("stats export properties", () => {
     )
   })
 
-  test("R1 invariant: per-model rows are exactly the models used, ordered by message count", () => {
+  test("R1 invariant: model and tool rows are exactly the ones used, ordered by message and call count", () => {
     fc.assert(
       fc.property(statsArb, (stats) => {
-        const rows = shapeStats(stats).models
-        expect(rows.map((row) => row.id).sort()).toEqual(Object.keys(stats.modelUsage).sort())
-        for (const row of rows) expect(row.messages).toBe(stats.modelUsage[row.id].messages)
-        for (let i = 1; i < rows.length; i++) expect(rows[i - 1].messages).toBeGreaterThanOrEqual(rows[i].messages)
+        const { models, tools } = shapeStats(stats)
+        expect(models.map((row) => row.id).sort()).toEqual(Object.keys(stats.modelUsage).sort())
+        for (const row of models) expect(row.messages).toBe(stats.modelUsage[row.id].messages)
+        for (let i = 1; i < models.length; i++) expect(models[i - 1].messages).toBeGreaterThanOrEqual(models[i].messages)
+        expect(tools.map((row) => row.name).sort()).toEqual(Object.keys(stats.toolUsage).sort())
+        for (let i = 1; i < tools.length; i++) expect(tools[i - 1].calls).toBeGreaterThanOrEqual(tools[i].calls)
       }),
     )
   })
@@ -209,8 +242,90 @@ describe("stats export properties", () => {
     )
   })
 
+  // Acceptance: "for the same flags" -- --models/--tools cut every format the
+  // same way, and an absent or nonsensical limit means "everything".
+  const limit = fc.oneof(fc.constant(undefined), nat(8), fc.constantFrom(-1, NaN, Infinity))
+  test("R2 flags: --models/--tools keep the busiest N rows, and a missing or invalid limit keeps them all", () => {
+    fc.assert(
+      fc.property(statsArb, limit, limit, (stats, toolLimit, modelLimit) => {
+        const all = shapeStats(stats)
+        const limited = shapeStats(stats, toolLimit, modelLimit)
+        const kept = (n: number | undefined, rows: number) =>
+          n === undefined || Number.isNaN(n) || n < 0 ? rows : Math.min(n, rows)
+        expect(limited.models).toEqual(all.models.slice(0, kept(modelLimit, all.models.length)))
+        expect(limited.tools).toEqual(all.tools.slice(0, kept(toolLimit, all.tools.length)))
+      }),
+    )
+  })
+
+  // Acceptance: exports carry every field the CLI prints, including the date
+  // window. With no sessions, or a date Date can't represent, it is left empty.
+  test("R2 meta: every format reports the same date window, empty when there is no usable date", () => {
+    fc.assert(
+      fc.property(statsArb, (stats) => {
+        const payload = shapeStats(stats)
+        const usable = (t: number) => stats.totalSessions > 0 && t > 0 && t <= 8.64e15
+        expect(payload.meta.days).toBe(stats.days)
+        expect(payload.meta.earliest).toBe(usable(stats.dateRange.earliest) ? new Date(stats.dateRange.earliest).toISOString() : "")
+        expect(payload.meta.latest).toBe(usable(stats.dateRange.latest) ? new Date(stats.dateRange.latest).toISOString() : "")
+
+        const csvMeta = csvRows(renderCsv(payload)).filter((row) => row.scope === "meta")
+        expect(csvMeta.map(({ id, metric, value }) => ({ id, metric, value }))).toEqual(
+          Object.entries(payload.meta).map(([metric, value]) => ({ id: "", metric, value: String(value) })),
+        )
+
+        const window = payload.meta.earliest ? ` · ${payload.meta.earliest} → ${payload.meta.latest}` : ""
+        expect(renderMarkdown(payload).split("\n")[2]).toBe(
+          `Generated \`${payload.meta.generated_at}\` · ${payload.meta.days} day window${window}`,
+        )
+      }),
+    )
+  })
+
+  // The md export has to stay readable as a document, not just parseable by
+  // the lenient reader above: one GFM table (or a placeholder) per section.
+  test("R2 markdown: the md export is well-formed GFM with one table or placeholder per section", () => {
+    fc.assert(
+      fc.property(statsArb, (stats) => {
+        const payload = shapeStats(stats)
+        const md = renderMarkdown(payload)
+        expect(md.endsWith("\n")).toBe(true)
+        const [title, ...sections] = md.split("\n## ")
+        expect(title.split("\n")).toEqual(["# opencode usage stats", "", expect.stringMatching(/^Generated `/), ""])
+        expect(sections.map((section) => section.split("\n")[0])).toEqual([
+          "Overview",
+          "Tokens",
+          "Model usage",
+          "Tool usage",
+        ])
+
+        const rows = [6, 6, payload.models.length, payload.tools.length]
+        const placeholders = ["", "", "_No model usage recorded._", "_No tool usage recorded._"]
+        sections.forEach((section, i) => {
+          const [, gap, ...body] = section.split("\n")
+          expect(gap).toBe("")
+          expect(body.at(-1)).toBe("")
+          const lines = body.slice(0, -1)
+          if (rows[i] === 0) return expect(lines).toEqual([placeholders[i]])
+
+          const cells = (line: string) => line.slice(2, -2).split(/(?<!\\) \| /)
+          const [header, separator, ...data] = lines
+          expect(separator).toMatch(/^\| --- (\| ---: )*\|$/)
+          expect(cells(separator).length).toBe(cells(header).length)
+          expect(data.length).toBe(rows[i])
+          for (const line of [header, ...data]) {
+            expect(line).toMatch(/^\| .* \|$/)
+            expect(cells(line).length).toBe(cells(header).length)
+          }
+          if (i >= 2) for (const line of data) expect(isCodeSpan(cells(line)[0])).toBe(true)
+        })
+      }),
+    )
+  })
+
   // Acceptance: no value has more than 4 decimal places or uses scientific
-  // notation, and token counts are exact integers.
+  // notation, and token counts are exact integers -- as written, not just
+  // once a csv reader has unquoted them.
   test("R3 invariant: csv numbers are plain decimals with at most 4 places, token counts integers", () => {
     const INTEGER_METRICS = new Set([
       "days",
@@ -226,9 +341,12 @@ describe("stats export properties", () => {
     ])
     fc.assert(
       fc.property(statsArb, (stats) => {
-        for (const row of csvRows(renderCsv(shapeStats(stats)))) {
+        const csv = renderCsv(shapeStats(stats))
+        expect(csv.split("\n")[0]).toBe("scope,scope_id,metric,value")
+        expect(csv.endsWith("\n")).toBe(true)
+        for (const row of csvRows(csv)) {
           if (row.scope === "meta" && row.metric !== "days") continue
-          expect(row.value).toMatch(INTEGER_METRICS.has(row.metric) ? /^\d+$/ : /^-?\d+(\.\d{1,4})?$/)
+          expect(row.rawValue).toMatch(INTEGER_METRICS.has(row.metric) ? /^\d+$/ : /^-?\d+(\.\d{1,4})?$/)
         }
       }),
     )
@@ -248,12 +366,16 @@ describe("stats export properties", () => {
 const format = fc.constantFrom("json", "csv", "md")
 const segment = fc.stringMatching(/^[a-z0-9_-]{1,8}$/)
 
+/** Parses an export file back into the format-neutral numbers. */
+const parseExport = (fmt: string, body: string) =>
+  fmt === "json" ? flatten(JSON.parse(body)) : fmt === "csv" ? fromCsv(body) : flatten(fromMarkdown(body))
+
 /** Runs exports with stderr silenced, in a scratch dir that is removed afterwards. */
-async function inScratch(run: (root: string) => Promise<void>) {
+async function inScratch(run: (root: string, stderr: ReturnType<typeof spyOn>) => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), "stats-export-prop-"))
   const err = spyOn(process.stderr, "write").mockImplementation(() => true)
   try {
-    await run(root)
+    await run(root, err)
   } finally {
     err.mockRestore()
     await rm(root, { recursive: true, force: true })
@@ -270,7 +392,7 @@ describe("stats export location properties", () => {
         fc.array(segment, { minLength: 1, maxLength: 3 }),
         fc.option(fc.array(segment, { minLength: 1, maxLength: 3 }), { nil: undefined }),
         async (fmt, configuredParts, outParts) => {
-          await inScratch(async (root) => {
+          await inScratch(async (root, stderr) => {
             const configured = join(root, "configured", ...configuredParts)
             const out = outParts && join(root, "out", ...outParts)
             const cwdBefore = await readdir(process.cwd())
@@ -280,9 +402,54 @@ describe("stats export location properties", () => {
             expect(path).toBe(join(out ?? configured, `opencode_stats.${fmt}`))
             expect(await readdir(out ?? configured)).toEqual([`opencode_stats.${fmt}`])
             expect(await readdir(process.cwd())).toEqual(cwdBefore)
+            // The file is in the requested format and says where it went.
+            const body = await readFile(path, "utf8")
+            expect(body.endsWith("\n")).toBe(true)
+            expect(parseExport(fmt, body)).toEqual(flatten(shapeStats(EXAMPLE)))
+            expect(stderr).toHaveBeenCalledWith(`Wrote ${path}\n`)
           })
         },
       ),
+      { numRuns: 25 },
+    )
+  })
+
+  // Acceptance: with nothing configured, the default is a stats folder of the
+  // opencode app (its data dir), not the data dir itself.
+  test("R4 default: without --out or stats_dir, exports go to a stats folder in opencode's data dir", () => {
+    const dir = fc.option(fc.oneof(fc.constant(""), segment.map((name) => join(tmpdir(), name))), { nil: undefined })
+    fc.assert(
+      fc.property(dir, dir, (out, configured) => {
+        const expected = out ? out : configured ? configured : join(Global.Path.data, "stats")
+        expect(resolveExportDir(out, configured)).toBe(expected)
+      }),
+    )
+  })
+
+  // A read-only or blocked location is a user condition: it must surface as a
+  // CliError naming the path, not a crash or a silent no-op.
+  test("R4 errors: an export dir or file that cannot be written fails with a CliError naming it", async () => {
+    await fc.assert(
+      fc.asyncProperty(format, fc.array(segment, { minLength: 1, maxLength: 3 }), fc.boolean(), async (fmt, parts, blockDir) => {
+        await inScratch(async (root) => {
+          const configured = join(root, "configured", ...parts)
+          let expected: string
+          let out: string | undefined
+          if (blockDir) {
+            // A regular file where a parent directory should be.
+            await writeFile(join(root, "file"), "")
+            out = join(root, "file", ...parts)
+            expected = `Could not create ${out}: `
+          } else {
+            // A directory where the export file should be.
+            await mkdir(join(configured, `opencode_stats.${fmt}`), { recursive: true })
+            expected = `Could not write ${join(configured, `opencode_stats.${fmt}`)}: `
+          }
+          const error = await Effect.runPromise(Effect.flip(exportStats(EXAMPLE, undefined, undefined, fmt, { out, configured })))
+          expect(error).toBeInstanceOf(CliError)
+          expect(error.message.startsWith(expected)).toBe(true)
+        })
+      }),
       { numRuns: 25 },
     )
   })
@@ -308,6 +475,26 @@ describe("stats export location properties", () => {
             const written = JSON.parse(await readFile(join(configured, "opencode_stats.json"), "utf8"))
             expect(withoutClock(written)).toEqual(withoutClock(shapeStats(runs.at(-1)!)))
           }
+        })
+      }),
+      { numRuns: 25 },
+    )
+  })
+
+  // Without --export the command is the terminal report: something is printed
+  // and no file is written anywhere.
+  test("R4 no export: without a format, stats prints to the terminal and writes no file", async () => {
+    await fc.assert(
+      fc.asyncProperty(statsArb, async (stats) => {
+        await inScratch(async (root) => {
+          const log = spyOn(console, "log").mockImplementation(() => {})
+          try {
+            await Effect.runPromise(reportStats(stats, undefined, undefined, undefined, join(root, "unused")))
+            expect(log).toHaveBeenCalled()
+          } finally {
+            log.mockRestore()
+          }
+          expect(await readdir(root)).toEqual([])
         })
       }),
       { numRuns: 25 },

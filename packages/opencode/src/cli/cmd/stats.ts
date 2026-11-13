@@ -628,11 +628,12 @@ export function renderMarkdown(data: ExportPayload) {
 }
 
 // A pipe splits a GFM table cell even inside a code span, so it has to be
-// escaped; a value holding a backtick needs a longer fence than its wrapper.
+// escaped; a value holding backticks needs a fence longer than its longest run.
 function mdCode(value: string) {
   const escaped = value.replaceAll("|", "\\|")
   if (!escaped.includes("`")) return `\`${escaped}\``
-  return `\`\` ${escaped} \`\``
+  const fence = "`".repeat(Math.max(...escaped.match(/`+/g)!.map((run) => run.length)) + 1)
+  return `${fence} ${escaped} ${fence}`
 }
 
 function modelTable(models: ExportPayload["models"], n: (value: number) => string) {
