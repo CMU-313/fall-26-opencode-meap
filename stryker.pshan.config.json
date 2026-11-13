@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "testRunner": "command",
+  "commandRunner": { "command": "cd packages/opencode && bun test test/cli/stats-export.property.test.ts" },
+  "mutate": ["packages/opencode/src/cli/cmd/stats.ts:418-683"],
+  "ignorePatterns": ["/*", "!/package.json", "!/bunfig.toml", "!/tsconfig.json", "!/packages", "/packages/*", "!/packages/opencode"],
+  "coverageAnalysis": "off",
+  "concurrency": 4,
+  "timeoutMS": 30000,
+  "reporters": ["html", "clear-text", "progress"]
+}
