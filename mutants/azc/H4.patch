@@ -1,0 +1,13 @@
+diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
+index e1a8280..d8fb986 100644
+--- a/packages/opencode/src/tool/edit.ts
++++ b/packages/opencode/src/tool/edit.ts
+@@ -283,7 +283,7 @@ export const LineTrimmedReplacer: Replacer = function* (content, find) {
+       let matchEndIndex = matchStartIndex
+       for (let k = 0; k < searchLines.length; k++) {
+         matchEndIndex += originalLines[i + k].length
+-        if (k < searchLines.length - 1) {
++        if (k < searchLines.length) {
+           matchEndIndex += 1 // Add newline character except for the last line
+         }
+       }

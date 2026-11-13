@@ -351,7 +351,14 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
             Effect.gen(function* () {
               yield* add()
               const result = yield* git(
-                [...quote, ...args(["diff", "--cached", "--no-ext-diff", "--name-only", hash, "--", "."])],
+                // --no-renames: with rename detection a moved file lists only its new path, so reverting the
+                // patch would delete the new file without restoring the original.
+                [
+                  ...quote,
+                  // -z: core.quotepath=false only stops git quoting non-ASCII; a path with a backslash, quote or
+                  // control character is still quoted, so undo would revert a path that doesn't exist.
+                  ...args(["diff", "--cached", "--no-ext-diff", "--no-renames", "--name-only", "-z", hash, "--", "."]),
+                ],
                 {
                   cwd: state.directory,
                 },
@@ -360,11 +367,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                 yield* Effect.logWarning("failed to get diff", { hash, exitCode: result.code })
                 return { hash, files: [] }
               }
-              const files = result.text
-                .trim()
-                .split("\n")
-                .map((x) => x.trim())
-                .filter(Boolean)
+              const files = result.text.split("\0").filter(Boolean)
 
               // Hide ignored-file removals from the user-facing patch output.
               const ignored = yield* ignore(files)
@@ -373,7 +376,8 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                 hash,
                 files: files
                   .filter((item) => !ignored.has(item))
-                  .map((x) => path.join(state.worktree, x).replaceAll("\\", "/")),
+                  // Only convert real separators: on macOS/Linux a backslash is a valid filename character.
+                  .map((x) => path.join(state.worktree, x).split(path.sep).join("/")),
               }
             }),
           )
@@ -417,7 +421,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                   ops.push({
                     hash: item.hash,
                     file,
-                    rel: path.relative(state.worktree, file).replaceAll("\\", "/"),
+                    rel: path.relative(state.worktree, file).split(path.sep).join("/"),
                   })
                 }
               }
@@ -463,8 +467,13 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                   continue
                 }
 
+                // -z keeps git from quoting non-ASCII or special paths, which would otherwise fail the
+                // `have` lookup below and delete files that do exist in the snapshot.
                 const tree = yield* git(
-                  [...core, ...args(["ls-tree", "--name-only", first.hash, "--", ...run.map((item) => item.rel)])],
+                  [
+                    ...core,
+                    ...args(["ls-tree", "-z", "--name-only", first.hash, "--", ...run.map((item) => item.rel)]),
+                  ],
                   {
                     cwd: state.worktree,
                   },
@@ -482,13 +491,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                   continue
                 }
 
-                const have = new Set(
-                  tree.text
-                    .trim()
-                    .split("\n")
-                    .map((item) => item.trim())
-                    .filter(Boolean),
-                )
+                const have = new Set(tree.text.split("\0").filter(Boolean))
                 const list = run.filter((item) => have.has(item.rel))
                 if (list.length) {
                   yield* Effect.logInfo("reverting", { hash: first.hash, files: list.length })

@@ -1,0 +1,13 @@
+diff --git a/packages/opencode/src/permission/index.ts b/packages/opencode/src/permission/index.ts
+index 2e27ff2..8345f2c 100644
+--- a/packages/opencode/src/permission/index.ts
++++ b/packages/opencode/src/permission/index.ts
+@@ -198,7 +198,7 @@ export function fromConfig(permission: ConfigPermissionV1.Info) {
+ }
+ 
+ export function merge(...rulesets: PermissionV1.Ruleset[]): PermissionV1.Rule[] {
+-  return rulesets.flat()
++  return rulesets.slice(0, -1).flat()
+ }
+ 
+ export function disabled(tools: string[], ruleset: PermissionV1.Ruleset): Set<string> {

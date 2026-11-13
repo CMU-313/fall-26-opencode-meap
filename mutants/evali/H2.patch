@@ -1,0 +1,13 @@
+diff --git a/packages/opencode/src/snapshot/index.ts b/packages/opencode/src/snapshot/index.ts
+index 9055dc6..9b06a07 100644
+--- a/packages/opencode/src/snapshot/index.ts
++++ b/packages/opencode/src/snapshot/index.ts
+@@ -354,7 +354,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
+                 // --no-renames: with rename detection a moved file lists only its new path, so reverting the
+                 // patch would delete the new file without restoring the original.
+                 [
+-                  ...quote,
++                  ...cfg,
+                   // -z: core.quotepath=false only stops git quoting non-ASCII; a path with a backslash, quote or
+                   // control character is still quoted, so undo would revert a path that doesn't exist.
+                   ...args(["diff", "--cached", "--no-ext-diff", "--no-renames", "--name-only", "-z", hash, "--", "."]),
